@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Sparkles, Save, Play, ArrowLeft, Loader2, AlertCircle, FileUp, PenLine } from "lucide-react";
+import { Sparkles, Save, Play, ArrowLeft, Loader2, AlertCircle, FileUp, PenLine, Check } from "lucide-react";
 import { useToast } from "@/components/shared/toast";
 import { parseFile } from "@/lib/parse-engine";
 import { readFile } from "@/lib/file-reader";
@@ -160,6 +160,8 @@ export default function NewRulePage() {
   }, [rule, router, showToast]);
 
   const stepLabels = ["选择方式", "上传文件", "AI分析", "编辑规则"];
+  const stepKeys = ["choose", "file", "ai", "edit"] as const;
+  const idx = stepKeys.indexOf(step);
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-8">
@@ -170,97 +172,117 @@ export default function NewRulePage() {
       <h1 className="text-2xl font-bold text-[#1d2129]">新建解析规则</h1>
       <p className="mt-1 text-sm text-[#86909c]">上传文件由 AI 自动生成，或手动配置全部参数</p>
 
-      {/* 步骤指示器 */}
-      <div className="mt-6 flex items-center gap-2">
-        {stepLabels.map((label, i) => {
-          const stepKey = ["choose", "file", "ai", "edit"][i];
-          const idx = ["choose", "file", "ai", "edit"].indexOf(step);
-          const isActive = i <= idx || step === "edit";
-          const isCurrent = (step === "edit" && i === 3) || stepKey === step;
-          return (
-            <div key={stepKey} className="flex items-center gap-2">
-              <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold ${isCurrent ? "bg-[#0fc6c2] text-white" : isActive ? "bg-[#e8fafa] text-[#0fc6c2]" : "bg-[#f0f0f0] text-[#86909c]"}`}>
-                {i + 1}
-              </div>
-              <span className="text-xs text-[#86909c]">{label}</span>
-              {i < 3 && <div className="h-px w-8 bg-[#e5e6eb]" />}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Step 1: 选择创建方式 */}
-      {step === "choose" && (
-        <div className="mt-6 grid grid-cols-2 gap-4">
-          <button onClick={() => setStep("file")} className="card hover:border-[#0fc6c2] transition-colors text-left">
-            <FileUp className="h-10 w-10 text-[#0fc6c2] opacity-70" />
-            <h3 className="mt-3 text-base font-semibold text-[#1d2129]">上传文件 → AI 分析</h3>
-            <p className="mt-1 text-sm text-[#86909c]">上传 Excel/PDF 出库单，AI 自动识别结构并生成解析规则</p>
-          </button>
-          <button onClick={handleManualCreate} className="card hover:border-[#0fc6c2] transition-colors text-left">
-            <PenLine className="h-10 w-10 text-[#0fc6c2] opacity-70" />
-            <h3 className="mt-3 text-base font-semibold text-[#1d2129]">手动创建规则</h3>
-            <p className="mt-1 text-sm text-[#86909c]">自行配置字段映射、解析模式等全部参数，无需上传文件</p>
-          </button>
-        </div>
-      )}
-
-      {/* Step 2: 上传文件 */}
-      {step === "file" && (
-        <div className="card mt-6">
-          <label className="drop-zone block cursor-pointer">
-            <input type="file" accept=".xlsx,.xls,.pdf" onChange={handleFileUpload} className="hidden" />
-            <Sparkles className="mx-auto h-12 w-12 text-[#0fc6c2] opacity-60" />
-            <p className="mt-3 text-base font-medium">点击上传文件，让 AI 分析结构</p>
-            <p className="mt-1 text-sm text-[#86909c]">支持 Excel / PDF 格式</p>
-          </label>
-          <div className="mt-4 pt-4 border-t border-[#e5e6eb]">
-            <button onClick={handleSkipAi} className="btn-outline gap-1 text-sm">
-              <PenLine className="h-4 w-4" />跳过 AI，手动配置
-            </button>
+      <div className="mt-6 grid gap-6 lg:grid-cols-[200px_1fr]">
+        {/* 左栏：垂直时间线 */}
+        <aside className="lg:sticky lg:top-6 lg:self-start">
+          <div className="card !p-5">
+            <ol className="relative">
+              {stepLabels.map((label, i) => {
+                const isLast = i === stepLabels.length - 1;
+                const isActive = i <= idx || step === "edit";
+                const isCurrent = (step === "edit" && i === 3) || stepKeys[i] === step;
+                return (
+                  <li key={stepKeys[i]} className="timeline-node pb-6 last:pb-0">
+                    {!isLast && (
+                      <span className={`timeline-line ${i < idx || step === "edit" ? "active" : ""}`} />
+                    )}
+                    <span
+                      className={`relative z-10 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold transition-colors ${
+                        isCurrent
+                          ? "bg-[#0fc6c2] text-white"
+                          : isActive
+                          ? "border-2 border-[#0fc6c2] bg-[#e8fafa] text-[#0fc6c2]"
+                          : "border border-[#e5e6eb] bg-white text-[#86909c]"
+                      }`}
+                    >
+                      {isActive && !isCurrent ? <Check className="h-4 w-4" /> : i + 1}
+                    </span>
+                    <span className={`text-sm font-medium ${isCurrent ? "text-[#1d2129]" : isActive ? "text-[#4e5969]" : "text-[#86909c]"}`}>
+                      {label}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
           </div>
-        </div>
-      )}
+        </aside>
 
-      {/* Step 3: AI分析 */}
-      {step === "ai" && (
-        <div className="card mt-6">
-          <div className="alert alert-info mb-4">
-            <AlertCircle className="inline-block h-4 w-4" />
-            <span className="ml-2 text-sm">文件已就绪：{fileName}（{fileRows.length} 行），点击下方按钮让 AI 分析文件结构并自动生成解析规则。</span>
-          </div>
-          {aiLoading ? (
-            <div className="py-8 text-center">
-              <Loader2 className="mx-auto h-8 w-8 animate-spin text-[#0fc6c2]" />
-              <p className="mt-3 text-sm text-[#86909c]">AI 正在分析文件结构，请稍候...</p>
-            </div>
-          ) : (
-            <div className="space-y-4 text-center">
-              <button onClick={handleAiGenerate} className="btn-primary gap-2 text-base px-8 py-3">
-                <Sparkles className="h-5 w-5" />AI 分析并生成规则
+        {/* 右栏：当前步骤内容 */}
+        <section>
+          {/* Step 1: 选择创建方式 */}
+          {step === "choose" && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <button onClick={() => setStep("file")} className="card hover:border-[#0fc6c2] transition-colors text-left">
+                <FileUp className="h-10 w-10 text-[#0fc6c2] opacity-70" />
+                <h3 className="mt-3 text-base font-semibold text-[#1d2129]">上传文件 → AI 分析</h3>
+                <p className="mt-1 text-sm text-[#86909c]">上传 Excel/PDF 出库单，AI 自动识别结构并生成解析规则</p>
               </button>
-              <div>
-                <button onClick={handleSkipAi} className="btn-ghost gap-1 text-sm">
+              <button onClick={handleManualCreate} className="card hover:border-[#0fc6c2] transition-colors text-left">
+                <PenLine className="h-10 w-10 text-[#0fc6c2] opacity-70" />
+                <h3 className="mt-3 text-base font-semibold text-[#1d2129]">手动创建规则</h3>
+                <p className="mt-1 text-sm text-[#86909c]">自行配置字段映射、解析模式等全部参数，无需上传文件</p>
+              </button>
+            </div>
+          )}
+
+          {/* Step 2: 上传文件 */}
+          {step === "file" && (
+            <div className="card">
+              <label className="drop-zone block cursor-pointer">
+                <input type="file" accept=".xlsx,.xls,.pdf" onChange={handleFileUpload} className="hidden" />
+                <Sparkles className="mx-auto h-12 w-12 text-[#0fc6c2] opacity-60" />
+                <p className="mt-3 text-base font-medium">点击上传文件，让 AI 分析结构</p>
+                <p className="mt-1 text-sm text-[#86909c]">支持 Excel / PDF 格式</p>
+              </label>
+              <div className="mt-4 pt-4 border-t border-[#e5e6eb]">
+                <button onClick={handleSkipAi} className="btn-outline gap-1 text-sm">
                   <PenLine className="h-4 w-4" />跳过 AI，手动配置
                 </button>
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {/* Step 4: 编辑规则 */}
-      {step === "edit" && (
-        <div className="mt-6">
-          <RuleEditor rule={rule} setRule={setRule} aiResponse={aiResponse} fileRows={fileRows} fileName={fileName} />
-          <div className="mt-4 flex gap-3">
-            <button onClick={handleSave} disabled={saving} className="btn-primary gap-1.5">
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {saving ? "保存中..." : "保存规则"}
-            </button>
-          </div>
-        </div>
-      )}
+          {/* Step 3: AI分析 */}
+          {step === "ai" && (
+            <div className="card">
+              <div className="alert alert-info mb-4">
+                <AlertCircle className="inline-block h-4 w-4" />
+                <span className="ml-2 text-sm">文件已就绪：{fileName}（{fileRows.length} 行），点击下方按钮让 AI 分析文件结构并自动生成解析规则。</span>
+              </div>
+              {aiLoading ? (
+                <div className="py-8 text-center">
+                  <Loader2 className="mx-auto h-8 w-8 animate-spin text-[#0fc6c2]" />
+                  <p className="mt-3 text-sm text-[#86909c]">AI 正在分析文件结构，请稍候...</p>
+                </div>
+              ) : (
+                <div className="space-y-4 text-center">
+                  <button onClick={handleAiGenerate} className="btn-primary gap-2 text-base px-8 py-3">
+                    <Sparkles className="h-5 w-5" />AI 分析并生成规则
+                  </button>
+                  <div>
+                    <button onClick={handleSkipAi} className="btn-ghost gap-1 text-sm">
+                      <PenLine className="h-4 w-4" />跳过 AI，手动配置
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Step 4: 编辑规则 */}
+          {step === "edit" && (
+            <div>
+              <RuleEditor rule={rule} setRule={setRule} aiResponse={aiResponse} fileRows={fileRows} fileName={fileName} />
+              <div className="mt-4 flex gap-3">
+                <button onClick={handleSave} disabled={saving} className="btn-primary gap-1.5">
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  {saving ? "保存中..." : "保存规则"}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

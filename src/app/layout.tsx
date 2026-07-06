@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { NavBar } from "@/components/shared/nav-bar";
+import { SideBar } from "@/components/shared/side-bar";
 import { ToastProvider } from "@/components/shared/toast";
 
 export const metadata: Metadata = {
@@ -17,8 +17,8 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body className="min-h-screen bg-[#f7f8fa] antialiased">
         <ToastProvider>
-          <NavBar />
-          <main className="pt-14">{children}</main>
+          <SideBar />
+          <main className="pt-14 lg:pt-0 lg:pl-[224px]">{children}</main>
         </ToastProvider>
       </body>
     </html>

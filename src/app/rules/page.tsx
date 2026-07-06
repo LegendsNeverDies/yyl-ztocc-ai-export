@@ -76,8 +76,8 @@ export default function RulesPage() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
-      <div className="mb-6 flex items-center justify-between">
+    <div className="mx-auto max-w-6xl px-6 py-8">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-[#1d2129]">解析规则管理</h1>
           <p className="mt-1 text-sm text-[#86909c]">管理所有文件解析规则，支持 AI 自动生成</p>
@@ -109,43 +109,42 @@ export default function RulesPage() {
           }
         />
       ) : (
-        <div className="space-y-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {rules.map((rule) => (
-            <div key={rule.id} className="card flex items-center justify-between">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-base font-semibold text-[#1d2129] truncate">{rule.name}</h3>
-                  <span className="tag tag-teal">{parseModeLabels[rule.parseMode] || rule.parseMode}</span>
-                  <span className="tag" style={{ background: '#f0f0f0', color: '#86909c' }}>{rule.fileType}</span>
-                </div>
-                {rule.description && (
-                  <p className="mt-1 text-sm text-[#86909c] truncate">{rule.description}</p>
-                )}
-                <p className="mt-1 text-xs text-[#86909c]">
-                  字段映射：{rule.fieldMappings?.length ?? 0} 个 | 更新于 {rule.updatedAt ? new Date(rule.updatedAt).toLocaleDateString("zh-CN") : "-"}
-                </p>
+            <div key={rule.id} className="card flex flex-col !p-5">
+              <div className="flex items-start justify-between gap-2">
+                <h3 className="text-base font-semibold text-[#1d2129] line-clamp-1" title={rule.name}>{rule.name}</h3>
+                <span className="tag tag-teal flex-shrink-0">{parseModeLabels[rule.parseMode] || rule.parseMode}</span>
               </div>
-              <div className="ml-4 flex items-center gap-2">
+              <div className="mt-1.5 flex items-center gap-2">
+                <span className="tag flex-shrink-0" style={{ background: '#f0f0f0', color: '#86909c' }}>{rule.fileType}</span>
+                <span className="text-xs text-[#86909c]">{rule.fieldMappings?.length ?? 0} 个字段映射</span>
+              </div>
+              {rule.description && (
+                <p className="mt-2 text-sm text-[#86909c] line-clamp-2" title={rule.description}>{rule.description}</p>
+              )}
+              <p className="mt-2 text-xs text-[#86909c]">
+                更新于 {rule.updatedAt ? new Date(rule.updatedAt).toLocaleDateString("zh-CN") : "-"}
+              </p>
+
+              <div className="mt-3 flex items-center gap-1 border-t border-[#e5e6eb] pt-3">
                 <button
                   onClick={() => router.push(`/rules/${rule.id}`)}
                   className="btn-ghost gap-1 text-xs"
                 >
-                  <Edit className="h-4 w-4" />
-                  编辑
+                  <Edit className="h-3.5 w-3.5" />编辑
                 </button>
                 <button
                   onClick={() => handleDuplicate(rule.id)}
                   className="btn-ghost gap-1 text-xs"
                 >
-                  <Copy className="h-4 w-4" />
-                  复制
+                  <Copy className="h-3.5 w-3.5" />复制
                 </button>
                 <button
                   onClick={() => handleDelete(rule.id)}
-                  className="btn-ghost gap-1 text-xs text-[#cf1322] hover:bg-[#fff1f0]"
+                  className="btn-ghost gap-1 text-xs text-[#cf1322] hover:bg-[#fff1f0] ml-auto"
                 >
-                  <Trash2 className="h-4 w-4" />
-                  删除
+                  <Trash2 className="h-3.5 w-3.5" />删除
                 </button>
               </div>
             </div>

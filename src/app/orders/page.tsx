@@ -17,7 +17,7 @@ export default function OrdersPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  // 详情弹窗
+  // 详情抽屉
   const [detailShipment, setDetailShipment] = useState<DbShipment | null>(null);
   const [detailRows, setDetailRows] = useState<DbOrderItem[] | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -65,7 +65,7 @@ export default function OrdersPage() {
     setDetailRows(null);
   }, []);
 
-  // 详情弹窗：ESC 关闭 + 锁定背景滚动
+  // 详情抽屉：ESC 关闭 + 锁定背景滚动
   useEffect(() => {
     if (!detailShipment) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDetail(); };
@@ -86,7 +86,7 @@ export default function OrdersPage() {
     <div className="mx-auto max-w-7xl px-6 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-[#1d2129]">已导入运单列表</h1>
-        <p className="mt-1 text-sm text-[#86909c]">按外部编码聚合的出库单，点击“详情”查看 SKU 明细</p>
+        <p className="mt-1 text-sm text-[#86909c]">按外部编码聚合的出库单，点击任意行或"详情"查看 SKU 明细</p>
       </div>
 
       {/* 筛选栏 */}
@@ -143,7 +143,7 @@ export default function OrdersPage() {
                 </thead>
                 <tbody>
                   {shipments.map((s) => (
-                    <tr key={s.id}>
+                    <tr key={s.id} onClick={() => handleViewDetail(s)} className="cursor-pointer">
                       <td className="text-xs whitespace-nowrap font-mono">{s.externalCode || <span className="text-[#86909c]">(无编码)</span>}</td>
                       <td className="text-xs whitespace-nowrap">{s.storeName || "-"}</td>
                       <td className="text-xs">{s.receiverName || "-"}</td>
@@ -152,7 +152,7 @@ export default function OrdersPage() {
                       <td className="text-xs text-center">{s.skuCount}</td>
                       <td className="text-xs text-center font-medium text-[#0b6e6e]">{s.totalQuantity}</td>
                       <td className="text-xs whitespace-nowrap">{formatDate(s.submittedAt)}</td>
-                      <td className="text-center">
+                      <td className="text-center" onClick={(e) => e.stopPropagation()}>
                         <button onClick={() => handleViewDetail(s)} className="btn-ghost gap-1 text-xs text-[#0fc6c2]">
                           <FileText className="h-3.5 w-3.5" />详情
                         </button>
@@ -186,67 +186,70 @@ export default function OrdersPage() {
         </>
       )}
 
-      {/* 详情弹窗 */}
+      {/* 详情抽屉 */}
       {detailShipment && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closeDetail}>
-          <div className="card max-h-[82vh] w-full max-w-3xl overflow-auto !p-0" onClick={(e) => e.stopPropagation()}>
+        <div className="drawer-overlay" onClick={closeDetail}>
+          <div className="drawer-panel" onClick={(e) => e.stopPropagation()}>
             {/* 头部 */}
-            <div className="sticky top-0 flex items-center justify-between border-b border-[#e5e6eb] bg-white px-5 py-3">
-              <div className="flex items-center gap-2">
-                <Package className="h-5 w-5 text-[#0fc6c2]" />
-                <h3 className="text-base font-semibold text-[#1d2129]">
+            <div className="flex items-center justify-between border-b border-[#e5e6eb] px-5 py-3.5">
+              <div className="flex min-w-0 items-center gap-2">
+                <Package className="h-5 w-5 flex-shrink-0 text-[#0fc6c2]" />
+                <h3 className="truncate text-base font-semibold text-[#1d2129]">
                   出库单详情 {detailShipment.externalCode ? `· ${detailShipment.externalCode}` : "· (无编码)"}
                 </h3>
               </div>
-              <button onClick={closeDetail} className="btn-ghost p-1.5"><X className="h-4 w-4" /></button>
+              <button onClick={closeDetail} className="btn-ghost flex-shrink-0 p-1.5"><X className="h-4 w-4" /></button>
             </div>
 
-            {/* 收货信息摘要 */}
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 px-5 py-4 text-sm md:grid-cols-3">
-              <div><span className="text-[#86909c]">收货门店：</span>{detailShipment.storeName || "-"}</div>
-              <div><span className="text-[#86909c]">收件人：</span>{detailShipment.receiverName || "-"}</div>
-              <div><span className="text-[#86909c]">电话：</span>{detailShipment.receiverPhone || "-"}</div>
-              <div className="md:col-span-3"><span className="text-[#86909c]">地址：</span>{detailShipment.receiverAddress || "-"}</div>
-              <div><span className="text-[#86909c]">SKU种类：</span>{detailShipment.skuCount}</div>
-              <div><span className="text-[#86909c]">总数量：</span>{detailShipment.totalQuantity}</div>
-              <div><span className="text-[#86909c]">提交时间：</span>{formatDate(detailShipment.submittedAt)}</div>
-            </div>
+            {/* 内容区滚动 */}
+            <div className="flex-1 overflow-y-auto">
+              {/* 收货信息摘要 */}
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2 px-5 py-4 text-sm md:grid-cols-3">
+                <div><span className="text-[#86909c]">收货门店：</span>{detailShipment.storeName || "-"}</div>
+                <div><span className="text-[#86909c]">收件人：</span>{detailShipment.receiverName || "-"}</div>
+                <div><span className="text-[#86909c]">电话：</span>{detailShipment.receiverPhone || "-"}</div>
+                <div className="md:col-span-3"><span className="text-[#86909c]">地址：</span>{detailShipment.receiverAddress || "-"}</div>
+                <div><span className="text-[#86909c]">SKU种类：</span>{detailShipment.skuCount}</div>
+                <div><span className="text-[#86909c]">总数量：</span>{detailShipment.totalQuantity}</div>
+                <div><span className="text-[#86909c]">提交时间：</span>{formatDate(detailShipment.submittedAt)}</div>
+              </div>
 
-            {/* SKU 明细表 */}
-            <div className="px-5 pb-5">
-              <h4 className="mb-2 text-sm font-medium text-[#4e5969]">SKU 明细</h4>
-              {detailLoading ? (
-                <div className="flex items-center justify-center py-8 text-sm text-[#86909c]">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#0fc6c2]" />加载明细...
-                </div>
-              ) : (
-                <div className="table-wrapper">
-                  <table className="table-styled text-xs">
-                    <thead>
-                      <tr>
-                        <th className="text-center" style={{ width: 50 }}>#</th>
-                        <th>SKU编码</th>
-                        <th>SKU名称</th>
-                        <th>规格</th>
-                        <th className="text-center">数量</th>
-                        <th>备注</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(detailRows ?? []).map((r, i) => (
-                        <tr key={r.id}>
-                          <td className="text-center text-[#86909c]">{i + 1}</td>
-                          <td className="whitespace-nowrap font-mono">{r.skuCode}</td>
-                          <td>{r.skuName}</td>
-                          <td>{r.skuSpec || "-"}</td>
-                          <td className="text-center">{r.skuQuantity}</td>
-                          <td>{r.remark || "-"}</td>
+              {/* SKU 明细表 */}
+              <div className="px-5 pb-5">
+                <h4 className="mb-2 text-sm font-medium text-[#4e5969]">SKU 明细</h4>
+                {detailLoading ? (
+                  <div className="flex items-center justify-center py-8 text-sm text-[#86909c]">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#0fc6c2]" />加载明细...
+                  </div>
+                ) : (
+                  <div className="table-wrapper">
+                    <table className="table-styled text-xs">
+                      <thead>
+                        <tr>
+                          <th className="text-center" style={{ width: 50 }}>#</th>
+                          <th>SKU编码</th>
+                          <th>SKU名称</th>
+                          <th>规格</th>
+                          <th className="text-center">数量</th>
+                          <th>备注</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                      </thead>
+                      <tbody>
+                        {(detailRows ?? []).map((r, i) => (
+                          <tr key={r.id}>
+                            <td className="text-center text-[#86909c]">{i + 1}</td>
+                            <td className="whitespace-nowrap font-mono">{r.skuCode}</td>
+                            <td>{r.skuName}</td>
+                            <td>{r.skuSpec || "-"}</td>
+                            <td className="text-center">{r.skuQuantity}</td>
+                            <td>{r.remark || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>

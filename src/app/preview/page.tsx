@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowLeft, Download, Plus, Trash2, Loader2, AlertCircle,
-  CheckCircle, Upload,
+  CheckCircle, Upload, CheckCheck,
 } from "lucide-react";
 import { useToast } from "@/components/shared/toast";
 import { ProgressBar } from "@/components/shared/progress-bar";
@@ -54,6 +54,7 @@ export default function PreviewPage() {
   const [submitProgress, setSubmitProgress] = useState({ current: 0, total: 0, percent: 0 });
   const [existingCodes, setExistingCodes] = useState<Set<string>>(new Set());
   const [editCell, setEditCell] = useState<{ idx: number; col: keyof OrderRow } | null>(null);
+  const [highlightIdx, setHighlightIdx] = useState<number | null>(null);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const codesFetched = useRef(false);
@@ -221,6 +222,15 @@ export default function PreviewPage() {
     }
   }, [rows, existingCodes, showToast]);
 
+  // 点击错误项：滚动到对应行并临时高亮
+  const handleJumpToError = useCallback((rowIndex: number) => {
+    const target = rows.findIndex((r) => r.rowIndex === rowIndex);
+    if (target < 0) return;
+    rowVirtualizer.scrollToIndex(target, { align: "center" });
+    setHighlightIdx(target);
+    setTimeout(() => setHighlightIdx((cur) => (cur === target ? null : cur)), 1400);
+  }, [rows, rowVirtualizer]);
+
   const errorRowSet = useMemo(() => new Set(errors.map((e) => e.rowIndex)), [errors]);
   const totalErrorRows = errorRowSet.size;
 
@@ -241,155 +251,201 @@ export default function PreviewPage() {
   }
 
   return (
-    <div className="mx-auto max-w-full px-4 py-8">
-      {/* 顶部信息栏 */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <button onClick={() => { if (isTestParse) window.close(); else router.push("/"); }} className="btn-ghost mb-2 gap-1">
-            <ArrowLeft className="h-4 w-4" />{isTestParse ? "关闭预览" : "返回"}
-          </button>
-          <h1 className="text-xl font-bold text-[#1d2129]">
-            数据预览与编辑
-            {isTestParse && <span className="tag tag-orange ml-2 align-middle text-xs">试解析 · 只读测试</span>}
-          </h1>
-          <p className="text-xs text-[#86909c]">
-            文件：{fileName} | 规则：{ruleName} | 解析耗时：{parseDuration}ms | 共 {rows.length} 条记录
-            {totalErrorRows > 0 && (
-              <span className="ml-2 inline-flex items-center gap-1 text-[#cf1322]">
-                <AlertCircle className="h-3 w-3" />{errors.length} 处错误
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          <button onClick={handleAddRow} className="btn-outline gap-1 text-sm">
-            <Plus className="h-4 w-4" />新增行
-          </button>
-          <button onClick={handleExport} className="btn-outline gap-1 text-sm">
-            <Download className="h-4 w-4" />导出Excel
-          </button>
-          {!isTestParse && (
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || totalErrorRows > 0}
-              className="btn-primary gap-1.5 text-sm"
-            >
-              {submitting ? (<><Loader2 className="h-4 w-4 animate-spin" />提交中...</>) : (<><Upload className="h-4 w-4" />提交下单</>)}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* 提交进度 */}
-      {submitting && (
-        <div className="mb-4">
-          <ProgressBar percent={submitProgress.percent} label={`正在提交... ${submitProgress.current}/${submitProgress.total}`} />
-        </div>
-      )}
-
-      {/* 提交结果 */}
-      {submitResult && (
-        <div className={`alert mb-4 ${submitResult.failed > 0 ? "alert-warning" : "alert-success"}`}>
-          <CheckCircle className="inline-block h-4 w-4" />
-          <span className="ml-2">
-            提交完成：成功 <strong>{submitResult.success}</strong> 条
-            {submitResult.failed > 0 && (<>，失败 <strong>{submitResult.failed}</strong> 条</>)}
-          </span>
-        </div>
-      )}
-
-      {/* 错误汇总（全部一次性展示，超出滚动） */}
-      {errors.length > 0 && (
-        <div className="alert alert-danger mb-4">
-          <AlertCircle className="inline-block h-4 w-4" />
-          <strong className="ml-1">共 {errors.length} 个校验错误：</strong>
-          <ul className="mt-1 ml-6 max-h-40 list-disc overflow-y-auto text-xs">
-            {errors.map((err, i) => (
-              <li key={i}>第 {err.rowIndex + 1} 行 - {err.field}：{err.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* 虚拟列表表格 */}
-      <div className="card overflow-hidden !p-0">
-        <div ref={parentRef} className="overflow-auto rounded-lg border border-[#e5e6eb]" style={{ maxHeight: "65vh" }}>
-          <div style={{ width: totalWidth, position: "relative" }}>
-            {/* 表头 */}
-            <div
-              className="sticky top-0 z-20 flex bg-[#e8fafa] text-[13px] font-semibold text-[#0b6e6e]"
-              style={{ height: ROW_H }}
-            >
-              {COLUMNS.map((col) => (
-                <div key={col.key} className="flex items-center border-b border-r border-[#d0e8e8] px-3" style={{ width: col.width }}>
-                  {col.label}{col.required && <span className="ml-0.5 text-[#cf1322]">*</span>}
-                </div>
-              ))}
-              <div className="flex items-center justify-center border-b border-[#d0e8e8] px-2" style={{ width: ACTION_W }}>操作</div>
-            </div>
-
-            {/* 虚拟行 */}
-            <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
-              {rowVirtualizer.getVirtualItems().map((vi) => {
-                const row = rows[vi.index];
-                const hasRowError = errorRowSet.has(row.rowIndex);
-                return (
-                  <div
-                    key={row.id || vi.index}
-                    className="absolute left-0 flex text-xs"
-                    style={{ top: 0, transform: `translateY(${vi.start}px)`, height: ROW_H, width: "100%", background: hasRowError ? "#fff1f0" : vi.index % 2 ? "#fafbfc" : "#fff" }}
-                  >
-                    {COLUMNS.map((col) => {
-                      const fieldErrors = getFieldErrors(row.rowIndex, col.key);
-                      const hasError = fieldErrors.length > 0;
-                      const isEditing = editCell?.idx === vi.index && editCell?.col === col.key;
-                      const value = col.key === "rowIndex" ? vi.index + 1 : row[col.key];
-                      return (
-                        <div
-                          key={col.key}
-                          onClick={() => handleCellClick(vi.index, col.key)}
-                          className="relative flex items-center border-b border-r border-[#e5e6eb] px-3"
-                          style={{ width: col.width, cursor: col.key === "rowIndex" ? "default" : "text", background: hasError ? "#fff1f0" : undefined, borderColor: hasError ? "#ffccc7" : undefined, color: col.key === "rowIndex" ? "#86909c" : "#4e5969" }}
-                          title={hasError ? fieldErrors.map((e) => e.message).join("; ") : undefined}
-                        >
-                          {isEditing ? (
-                            <input
-                              autoFocus
-                              className="absolute inset-0 z-10 w-full border border-[#0fc6c2] bg-white px-3 text-xs shadow-[0_0_0_2px_rgba(15,198,194,0.15)] outline-none"
-                              value={String(value ?? "")}
-                              onChange={(e) => updateCell(vi.index, col.key, e.target.value)}
-                              onBlur={() => setEditCell(null)}
-                              onKeyDown={(e) => handleCellKeyDown(e, vi.index, col.key)}
-                              type={col.key === "skuQuantity" ? "number" : "text"}
-                              min={col.key === "skuQuantity" ? 1 : undefined}
-                            />
-                          ) : (
-                            <span className="truncate">{String(value ?? "")}</span>
-                          )}
-                          {hasError && !isEditing && (
-                            <span className="absolute right-1 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center rounded-full bg-[#cf1322] text-[9px] text-white">!</span>
-                          )}
-                        </div>
-                      );
-                    })}
-                    <div className="flex items-center justify-center border-b border-[#e5e6eb]" style={{ width: ACTION_W }}>
-                      <button onClick={() => handleDeleteRow(vi.index)} className="p-1 text-[#cf1322] hover:opacity-70" title="删除行">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+    <div className="mx-auto max-w-[1600px] px-4 py-6">
+      <div className="grid gap-4 lg:grid-cols-[296px_1fr]">
+        {/* 左栏：统计 + 错误列表 */}
+        <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-3rem)] lg:flex lg:flex-col">
+          {/* 统计卡片 */}
+          <div className="card !p-4">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-xl font-bold text-[#1d2129]">{rows.length}</div>
+                <div className="text-xs text-[#86909c]">总计</div>
+              </div>
+              <div>
+                <div className="text-xl font-bold text-[#cf1322]">{totalErrorRows}</div>
+                <div className="text-xs text-[#86909c]">错误行</div>
+              </div>
+              <div>
+                <div className="text-xl font-bold text-[#17c964]">{rows.length - totalErrorRows}</div>
+                <div className="text-xs text-[#86909c]">正常</div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* 数据统计 */}
-      <div className="mt-4 flex items-center gap-4 text-xs text-[#86909c]">
-        <span>总计 {rows.length} 行</span>
-        <span className="text-[#cf1322]">错误行 {totalErrorRows}</span>
-        <span className="text-[#17c964]">无错误行 {rows.length - totalErrorRows}</span>
+          {/* 错误列表 */}
+          <div className="card !p-4 flex min-h-0 flex-col lg:flex-1">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold text-[#1d2129]">
+                <AlertCircle className="h-4 w-4 text-[#cf1322]" />
+                校验错误
+                {errors.length > 0 && <span className="text-[#cf1322]">({errors.length})</span>}
+              </h3>
+              {errors.length > 0 && <span className="text-xs text-[#86909c]">点击跳转</span>}
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto lg:max-h-none">
+              {errors.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <CheckCheck className="h-10 w-10 text-[#17c964] opacity-60" />
+                  <p className="mt-2 text-sm text-[#4e5969]">无校验错误</p>
+                  <p className="text-xs text-[#86909c]">可直接提交下单</p>
+                </div>
+              ) : (
+                <ul className="space-y-1.5">
+                  {errors.map((err, i) => (
+                    <li key={i}>
+                      <button
+                        onClick={() => handleJumpToError(err.rowIndex)}
+                        className="w-full rounded-md border border-[#ffd6d6] bg-[#fff1f0] px-2.5 py-1.5 text-left text-xs transition-colors hover:border-[#ff9c9c] hover:bg-[#ffe0de]"
+                      >
+                        <span className="font-medium text-[#cf1322]">第 {err.rowIndex + 1} 行</span>
+                        <span className="text-[#86909c]"> · {err.field}</span>
+                        <p className="mt-0.5 truncate text-[#4e5969]">{err.message}</p>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </aside>
+
+        {/* 右栏：信息条 + 表格 */}
+        <section className="flex min-w-0 flex-col gap-4">
+          {/* 顶部信息条 */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <button
+                onClick={() => { if (isTestParse) window.close(); else router.push("/"); }}
+                className="btn-ghost mb-1.5 gap-1 text-xs"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />{isTestParse ? "关闭预览" : "返回"}
+              </button>
+              <h1 className="text-lg font-bold text-[#1d2129]">
+                数据预览与编辑
+                {isTestParse && <span className="tag tag-orange ml-2 align-middle text-xs">试解析 · 只读测试</span>}
+              </h1>
+              <p className="truncate text-xs text-[#86909c]">
+                文件：{fileName} | 规则：{ruleName} | 解析耗时：{parseDuration}ms | 共 {rows.length} 条记录
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={handleAddRow} className="btn-outline gap-1 text-sm">
+                <Plus className="h-4 w-4" />新增行
+              </button>
+              <button onClick={handleExport} className="btn-outline gap-1 text-sm">
+                <Download className="h-4 w-4" />导出Excel
+              </button>
+              {!isTestParse && (
+                <button
+                  onClick={handleSubmit}
+                  disabled={submitting || totalErrorRows > 0}
+                  className="btn-primary gap-1.5 text-sm"
+                >
+                  {submitting ? (<><Loader2 className="h-4 w-4 animate-spin" />提交中...</>) : (<><Upload className="h-4 w-4" />提交下单</>)}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 提交进度 */}
+          {submitting && (
+            <ProgressBar percent={submitProgress.percent} label={`正在提交... ${submitProgress.current}/${submitProgress.total}`} />
+          )}
+
+          {/* 提交结果 */}
+          {submitResult && (
+            <div className={`alert ${submitResult.failed > 0 ? "alert-warning" : "alert-success"}`}>
+              <CheckCircle className="inline-block h-4 w-4" />
+              <span className="ml-2">
+                提交完成：成功 <strong>{submitResult.success}</strong> 条
+                {submitResult.failed > 0 && (<>，失败 <strong>{submitResult.failed}</strong> 条</>)}
+              </span>
+            </div>
+          )}
+
+          {/* 虚拟列表表格 */}
+          <div className="card overflow-hidden !p-0">
+            <div ref={parentRef} className="overflow-auto rounded-lg border border-[#e5e6eb]" style={{ maxHeight: "calc(100vh - 220px)" }}>
+              <div style={{ width: totalWidth, position: "relative" }}>
+                {/* 表头 */}
+                <div
+                  className="sticky top-0 z-20 flex bg-[#e8fafa] text-[13px] font-semibold text-[#0b6e6e]"
+                  style={{ height: ROW_H }}
+                >
+                  {COLUMNS.map((col) => (
+                    <div key={col.key} className="flex items-center border-b border-r border-[#d0e8e8] px-3" style={{ width: col.width }}>
+                      {col.label}{col.required && <span className="ml-0.5 text-[#cf1322]">*</span>}
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-center border-b border-[#d0e8e8] px-2" style={{ width: ACTION_W }}>操作</div>
+                </div>
+
+                {/* 虚拟行 */}
+                <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+                  {rowVirtualizer.getVirtualItems().map((vi) => {
+                    const row = rows[vi.index];
+                    const hasRowError = errorRowSet.has(row.rowIndex);
+                    const isHighlighted = highlightIdx === vi.index;
+                    return (
+                      <div
+                        key={row.id || vi.index}
+                        className="absolute left-0 flex text-xs"
+                        style={{
+                          top: 0,
+                          transform: `translateY(${vi.start}px)`,
+                          height: ROW_H,
+                          width: "100%",
+                          background: isHighlighted ? "#e8fafa" : hasRowError ? "#fff1f0" : vi.index % 2 ? "#fafbfc" : "#fff",
+                          transition: "background 0.3s ease",
+                        }}
+                      >
+                        {COLUMNS.map((col) => {
+                          const fieldErrors = getFieldErrors(row.rowIndex, col.key);
+                          const hasError = fieldErrors.length > 0;
+                          const isEditing = editCell?.idx === vi.index && editCell?.col === col.key;
+                          const value = col.key === "rowIndex" ? vi.index + 1 : row[col.key];
+                          return (
+                            <div
+                              key={col.key}
+                              onClick={() => handleCellClick(vi.index, col.key)}
+                              className="relative flex items-center border-b border-r border-[#e5e6eb] px-3"
+                              style={{ width: col.width, cursor: col.key === "rowIndex" ? "default" : "text", background: hasError ? "#fff1f0" : undefined, borderColor: hasError ? "#ffccc7" : undefined, color: col.key === "rowIndex" ? "#86909c" : "#4e5969" }}
+                              title={hasError ? fieldErrors.map((e) => e.message).join("; ") : undefined}
+                            >
+                              {isEditing ? (
+                                <input
+                                  autoFocus
+                                  className="absolute inset-0 z-10 w-full border border-[#0fc6c2] bg-white px-3 text-xs shadow-[0_0_0_2px_rgba(15,198,194,0.15)] outline-none"
+                                  value={String(value ?? "")}
+                                  onChange={(e) => updateCell(vi.index, col.key, e.target.value)}
+                                  onBlur={() => setEditCell(null)}
+                                  onKeyDown={(e) => handleCellKeyDown(e, vi.index, col.key)}
+                                  type={col.key === "skuQuantity" ? "number" : "text"}
+                                  min={col.key === "skuQuantity" ? 1 : undefined}
+                                />
+                              ) : (
+                                <span className="truncate">{String(value ?? "")}</span>
+                              )}
+                              {hasError && !isEditing && (
+                                <span className="absolute right-1 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center rounded-full bg-[#cf1322] text-[9px] text-white">!</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                        <div className="flex items-center justify-center border-b border-[#e5e6eb]" style={{ width: ACTION_W }}>
+                          <button onClick={() => handleDeleteRow(vi.index)} className="p-1 text-[#cf1322] hover:opacity-70" title="删除行">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

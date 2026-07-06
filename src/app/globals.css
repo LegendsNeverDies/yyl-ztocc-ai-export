@@ -424,3 +424,53 @@ body {
   font-size: 14px;
   margin-top: 8px;
 }
+
+/* ====== 侧滑抽屉（详情面板） ====== */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+  animation: fadeIn 0.2s ease;
+}
+
+.drawer-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 51;
+  height: 100vh;
+  width: 100%;
+  max-width: 480px;
+  background: #fff;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  animation: slideInLeft 0.25s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes slideInLeft {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* ====== 垂直时间线（步骤器） ====== */
+.timeline-node {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: relative;
+}
+
+.timeline-line {
+  position: absolute;
+  left: 15px;
+  top: 32px;
+  bottom: -16px;
+  width: 2px;
+  background: var(--color-border);
+}
+
+.timeline-line.active {
+  background: var(--color-primary);
+}

@@ -70,7 +70,8 @@ export default function EditRulePage() {
       <div className="mt-6">
         <RuleConfigForm rule={rule} setRule={setRule} />
 
-        <div className="mt-4 flex gap-3 pt-2">
+        {/* sticky 保存栏 */}
+        <div className="sticky bottom-4 z-10 mt-4 flex items-center gap-3 rounded-lg border border-[#e5e6eb] bg-white/95 px-4 py-3 shadow-[0_-2px_12px_rgba(0,0,0,0.06)] backdrop-blur">
           <button onClick={handleSave} disabled={saving} className="btn-primary gap-1.5">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             {saving ? "保存中..." : "保存修改"}
