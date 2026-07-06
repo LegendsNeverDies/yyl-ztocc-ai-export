@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 考试题目：万能导入 —— 智能多格式批量下单系统 V2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif; color: #1d2129; line-height: 1.8; background: #f7f8fa; padding: 40px 20px; }
+  .container { max-width: 960px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 2px 20px rgba(0,0,0,.06); padding: 48px 56px; }
+
+  h1 { font-size: 26px; font-weight: 700; text-align: center; color: #0fc6c2; margin-bottom: 8px; }
+  .subtitle { text-align: center; font-size: 15px; color: #86909c; margin-bottom: 36px; }
+  h2 { font-size: 20px; font-weight: 700; color: #0fc6c2; margin: 36px 0 16px; padding-left: 12px; border-left: 4px solid #0fc6c2; }
+  h3 { font-size: 17px; font-weight: 600; color: #1d2129; margin: 24px 0 12px; }
+  h4 { font-size: 15px; font-weight: 600; color: #4e5969; margin: 16px 0 8px; }
+
+  p { font-size: 15px; color: #4e5969; margin-bottom: 12px; }
+  ul, ol { padding-left: 24px; margin-bottom: 16px; }
+  li { font-size: 15px; color: #4e5969; margin-bottom: 8px; }
+  strong { color: #1d2129; }
+  code { background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #0fc6c2; }
+
+  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
+  th { background: #e8fafa; color: #0b6e6e; font-weight: 600; padding: 10px 14px; text-align: left; border: 1px solid #d0e8e8; }
+  td { padding: 10px 14px; border: 1px solid #e5e6eb; color: #4e5969; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  td.score { text-align: center; font-weight: 700; color: #0fc6c2; }
+
+  .alert { background: #fff7e8; border: 1px solid #ffe4ba; border-radius: 8px; padding: 14px 18px; margin: 16px 0; }
+  .alert strong { color: #d97b00; }
+  .alert-danger { background: #fff1f0; border-color: #ffccc7; }
+  .alert-danger strong { color: #cf1322; }
+  .alert-info { background: #e8fafa; border-color: #b5e8e8; }
+  .alert-info strong { color: #0b6e6e; }
+
+  .tag { display: inline-block; background: #e8fafa; color: #0b6e6e; font-size: 12px; padding: 2px 10px; border-radius: 10px; margin-right: 6px; font-weight: 500; }
+  .tag-red { background: #fff1f0; color: #cf1322; }
+  .tag-orange { background: #fff7e8; color: #d97b00; }
+
+  .footer { text-align: center; margin-top: 40px; padding-top: 24px; border-top: 1px solid #e5e6eb; font-size: 14px; color: #86909c; }
+  .demo-links { margin: 16px 0; }
+  .demo-links a { display: inline-block; background: #0fc6c2; color: #fff; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-size: 14px; margin: 4px 6px 4px 0; }
+  .demo-links a:hover { background: #0bada9; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>AI 考试题目：万能导入 V2</h1>
+<p class="subtitle">智能多格式批量下单系统 —— 大模型 + 高性能</p>
+
+<!-- ====== 一、项目背景 ====== -->
+<h2>一、项目背景</h2>
+<p>物流/快递行业需要频繁批量下单，客户提供的文件格式各异（<strong>Excel / PDF</strong>），且文档结构复杂（有干扰性头部信息、横向排列字段、合并单元格、非标准表格等）。现需开发一个 Web 应用，<strong>通过介入大模型（LLM）实现任意格式文件的智能解析与导入</strong>，完成批量下单流程，并部署到 Vercel 平台在线访问。</p>
+
+<div class="alert alert-info">
+  <strong>核心变化（相较 V1）：</strong><br>
+  1) UI 风格须与鲸天系统保持一致；2) 通过大模型实现任意格式解析；3) 严苛性能要求；
+</div>
+
+<!-- ====== 二、技术要求 ====== -->
+<h2>二、技术要求</h2>
+<table>
+  <tr><th>项目</th><th>要求</th></tr>
+  <tr><td>技术栈</td><td>Next.js App Router + TypeScript</td></tr>
+  <tr><td>部署</td><td>Vercel，提供可访问 URL</td></tr>
+  <tr><td>UI 风格</td><td>与鲸天系统（见下方参考截图）保持一致的设计语言：主色 <code>#0fc6c2</code>、圆角卡片、清爽蓝绿色调</td></tr>
+  <tr><td>大模型</td><td>通过 API 调用大模型（如 DeepSeek / Mimo等），将文件内容转为结构化下单数据</td></tr>
+  <tr><td>数据库</td><td>Neon，通过 Vercel Marketplace 集成</td></tr>
+</table>
+
+<!-- ====== 三、字段定义 ====== -->
+<h2>三、下单字段定义</h2>
+<p>说明：每条出库单根据<strong>外部编码</strong>聚合，同一个外部编码下的多个 SKU 行共享一组收货信息，展示为一个出库单。</p>
+<table>
+  <tr><th>字段名</th><th>说明</th><th>必填</th></tr>
+  <tr><td>外部编码</td><td>外部系统订单唯一编号，用于去重和聚合（如配送单号）</td><td><span class="tag">否</span></td></tr>
+  <tr><td>收货门店</td><td>收货门店/机构名称（如"尹三顺自助烤肉（银泰店）"）</td><td rowspan="4"><strong style="color:#d97b00">A组 / B组<br>二选一必填<br>详见下方说明</strong></td></tr>
+  <tr><td>收件人姓名</td><td>收货人姓名</td></tr>
+  <tr><td>收件人电话</td><td>收货人联系方式</td></tr>
+  <tr><td>收件人地址</td><td>收货人完整地址</td></tr>
+  <tr><td>SKU物品编码</td><td>SKU 唯一编码</td><td><span class="tag tag-red">是</span></td></tr>
+  <tr><td>SKU物品名称</td><td>SKU 名称</td><td><span class="tag tag-red">是</span></td></tr>
+  <tr><td>SKU发货数量</td><td>发货数量，必须为正数</td><td><span class="tag tag-red">是</span></td></tr>
+  <tr><td>SKU规格型号</td><td>物品规格描述</td><td><span class="tag">否</span></td></tr>
+  <tr><td>备注</td><td>附加说明</td><td><span class="tag">否</span></td></tr>
+</table>
+<div class="alert">
+  <strong>A组 vs B组（二选一）：</strong><br>
+  <strong>A组（门店模式）：</strong>只需填写"收货门店"，不要求收件人姓名/电话/地址<br>
+  <strong>B组（收件人模式）：</strong>需填写"收件人姓名 + 收件人电话 + 收件人地址"三个字段，不要求收货门店<br>
+  两组都填也可以，但至少填一组。两组都没填则校验不通过。
+</div>
+<!-- ====== 四、功能需求 ====== -->
+<h2>四、功能需求</h2>
+
+<h3>模块一：解析规则配置 + AI 辅助生成（核心考点）</h3>
+<p>随题附 4 份真实出库单文件（见 demos 目录），格式和业务结构完全不同。<strong>禁止为每种文件硬编码解析逻辑</strong>，系统必须提供<strong>可配置的解析规则体系</strong>，并且支持通过 AI 大模型<strong>自动分析文件并生成解析规则</strong>。</p>
+
+<div class="alert alert-info">
+  <strong>核心设计理念：</strong>不是写 4 个 if-else 去适配 4 种文件，而是设计一套<strong>通用的规则描述语言/规则引擎</strong>，每种新格式只需要"配置一条规则"即可适配。规则可以由用户手动配置，也可以由 AI 分析文件后自动生成。理想状态下，新增第 5 种、第 10 种格式的出库单时，<strong>系统代码零改动</strong>。
+</div>
+
+<ul>
+  <li><strong>解析规则管理</strong>：规则保存到服务器端持久化存储，支持创建、编辑、删除、复制。上传文件时由用户手动选择使用哪条规则，不做自动匹配。提供<strong>"新建规则"按钮</strong>，用户可随时创建新规则</li>
+  <li><strong>AI 辅助生成规则（关键能力）</strong>：导入文件后，<strong>先由大模型预处理</strong>——AI 分析文件结构并生成一套推荐规则，然后用户在此基础上<strong>手动微调确认</strong>后保存。AI 需明确标注哪些映射是推测的，让用户做最终确认</li>
+  <li><strong>规则预览测试</strong>：保存规则前，可用当前文件作为样例进行<strong>试解析</strong>，实时预览解析结果，确认正确后再保存</li>
+</ul>
+
+<p>规则的具体结构如何描述、字段如何映射、复杂格式（跨行聚合、矩阵转置、复合单元格拆分、多Sheet合并、卡片式拆分、纯文本解析等）如何处理，由考生根据 6 份 demo 文件的实际差异自行设计方案。</p>
+
+<h4>6 份出库单差异说明（考生需全部兼容）</h4>
+<div class="alert">
+  <strong>注意：</strong>以下文件为考核用例，考生不得为任何一份文件编写专门的硬编码解析逻辑。所有兼容能力必须通过<strong>配置不同的解析规则</strong>来实现（规则可由 AI 生成或手动配置）。<strong>代码中不应出现任何文件名判断或特定列名硬编码。</strong>
+</div>
+<table>
+  <tr><th>文件</th><th>格式</th><th>结构特征</th><th>核心难点</th></tr>
+  <tr>
+    <td>黎明屯配送发货单</td>
+    <td><span class="tag">Excel</span></td>
+    <td>42列，3行干扰头部，第4行是表头，第5-6行是数据，第7行合计，第8行底部元信息，第9-10行收货人横向排列</td>
+    <td>收货人/电话/地址散落在数据区之外的独立行中，需通过"尾部信息区"规则单独提取</td>
+  </tr>
+  <tr>
+    <td>湖南仓发货明细</td>
+    <td><span class="tag">Excel</span></td>
+    <td>32列，第1行说明文字，第2行表头，第3行起为数据（167行），每行都含收货人/电话/地址</td>
+    <td>按配送单号分组，同一单号的多个物品行共享同一收货人信息；需通过"跨行聚合"规则合并</td>
+  </tr>
+  <tr>
+    <td>欢乐牧场模板</td>
+    <td><span class="tag">Excel</span></td>
+    <td>19列，第1行合并表头"SKU信息"+"门店信息"，第2行列头，门店名作为列头横向排列</td>
+    <td>完全不同的业务模型：SKU×门店矩阵，需通过"矩阵转置"规则将门店列转置为独立运单记录</td>
+  </tr>
+  <tr>
+    <td>黔寨寨配送单</td>
+    <td><span class="tag">PDF</span></td>
+    <td>2页，头部大量业务元信息，中间标准表格（物品类别/编码/名称/数量），底部收货人签字区</td>
+    <td>PDF格式解析；收货人/电话/地址在最后一页底部纯文本区域；合计行需跳过</td>
+  </tr>
+  <tr>
+    <td>多门店分Sheet出库单</td>
+    <td><span class="tag">Excel</span></td>
+    <td>3个Sheet，每个Sheet是一个门店的独立出库单，结构相同但数据不同</td>
+    <td><strong>多Sheet合并</strong>：需遍历所有Sheet，每个Sheet独立解析后合并；每Sheet底部有横向排列的收货人信息</td>
+  </tr>
+  <tr>
+    <td>门店调拨单(卡片式)</td>
+    <td><span class="tag">Excel</span></td>
+    <td>非标准表格，每条调拨记录是一个独立的"卡片"区域（标题行+收货信息+物品小表），纵向堆叠</td>
+    <td><strong>卡片边界识别</strong>：需识别"▶ 调拨记录 #N"作为卡片起始标志，每个卡片内部有独立的小表和收货信息</td>
+  </tr>
+</table>
+
+<h3>模块二：文件导入与解析执行</h3>
+<ul>
+  <li>支持上传 <strong>Excel（.xlsx/.xls）、PDF</strong> 文件，支持拖拽上传和点击上传</li>
+  <li><strong>解析流程</strong>：上传文件 → 用户<strong>手动选择已有规则</strong>或点击<strong>"新建规则"</strong> → 若新建则大模型先预处理分析文件生成推荐规则 → 用户手动微调确认 → 执行解析 → 展示结果</li>
+  <li>所有规则匹配均为<strong>手动操作</strong>，不做自动匹配。用户从规则列表中选择或新建</li>
+  <li>导入时显示<strong>实时进度条</strong>，显示百分比和当前处理条数/总条数</li>
+  <li>完善的错误处理：文件格式错误、文件为空、编码异常、无法解析等情况需给出明确提示</li>
+  <li><strong>解析失败</strong>时，需给出明确提示并将原始文件信息展示给用户，并提供手动配置规则的入口</li>
+</ul>
+
+<h3>模块三：数据预览与编辑</h3>
+<ul>
+  <li>导入后进入<strong>预览列表页面</strong>，以类 Excel 表格形式展示所有数据</li>
+  <li>表格要求：表头固定、支持横向滚动、单元格点击可直接编辑（类似在线 Excel）</li>
+  <li><strong>行内错误实时校验</strong>：必填字段缺失标红、电话格式错误标红、重量/件数非正数标红、温层值不在范围内标红</li>
+  <li><strong>全部错误一次性展示</strong>：校验时必须同时列出所有错误，明确标注具体行数、字段名和错误原因</li>
+  <li><strong>外部编码重复检测</strong>：同批次内重复 + 与已存在数据重复，均在对应行高亮提示</li>
+  <li>支持<strong>删除行</strong>、<strong>新增空行</strong>操作</li>
+  <li>支持将预览数据（含修改）<strong>导出为 Excel 文件</strong></li>
+</ul>
+
+<h3>模块四：提交下单</h3>
+<ul>
+  <li>有错误的行不允许提交，需提示用户先修正</li>
+  <li>点击"提交下单"后显示<strong>上传进度条</strong></li>
+  <li>提交成功后数据<strong>持久化到数据库</strong></li>
+  <li>返回提交结果汇总：成功 N 条、失败 N 条</li>
+</ul>
+
+<h3>模块五：已导入运单列表</h3>
+<ul>
+  <li>可查看所有历史已导入的运单记录（从数据库读取）</li>
+  <li>支持按外部编码、收件人姓名、提交时间进行筛选/搜索</li>
+  <li>支持分页展示</li>
+</ul>
+
+
+<!-- ====== 五、考点与评分标准 ====== -->
+<h2>五、考点与评分标准（总分 100 分）</h2>
+
+<div class="alert alert-danger">
+  <strong>前置要求：项目必须部署到 Vercel 并提供可在线访问的 URL，否则本次考试计 0 分。</strong>
+</div>
+
+<h3>考点 1：项目搭建与 Vercel 部署（10 分）</h3>
+<table>
+  <tr><th>要求</th><th>细则</th></tr>
+  <tr><td>Vercel 部署</td><td>项目部署到 Vercel，提供可访问 URL，构建无错误，页面正常加载</td></tr>
+  <tr><td>技术栈</td><td>使用 Next.js App Router + TypeScript</td></tr>
+</table>
+
+<h3>考点 2：UI 风格与交互体验（30 分）</h3>
+<p><span class="tag tag-orange">重要变化</span> 本考区对 UI 美观度和交互质量提出明确要求。整体给分。</p>
+<table>
+  <tr><th>评分要点</th><th>细则</th></tr>
+  <tr><td>鲸天系统风格统一</td><td>整体 UI 风格（主色 <code>#0fc6c2</code>、圆角卡片、字体、间距、阴影）须与鲸天系统保持高度一致，不能出现明显的风格割裂</td></tr>
+  <tr><td>布局与美观</td><td>页面布局清晰、层次分明，组件对齐规范，无错位/重叠/溢出；使用卡片式布局，有合理的留白和视觉层次</td></tr>
+  <tr><td>交互反馈</td><td>Loading 状态、成功/失败 Toast 提示、按钮防重复点击、空状态占位图、过渡动画等交互细节完善</td></tr>
+  <tr><td>响应式适配</td><td>在不同屏幕宽度下布局合理，表格横向可滚动，关键操作按钮始终可见</td></tr>
+</table>
+
+<h3>考点 3：解析规则配置 + AI 辅助生成（50 分）</h3>
+<p><span class="tag tag-orange">核心考点</span> 本考区为本次考试的核心难点。考察考生对"规则引擎"架构的理解，以及对 AI 辅助规则生成的运用。整体给分。</p>
+<table>
+  <tr><th>评分要点</th><th>细则</th></tr>
+  <tr><td>规则体系设计</td><td>设计了一套通用的解析规则描述方案（规则引擎），而非为每种文件写硬编码逻辑。规则可持久化存储、可复用。代码中<strong>不出现文件名判断或特定列名硬编码</strong></td></tr>
+  <tr><td>AI 辅助生成规则</td><td>上传新格式文件时，可通过大模型自动分析文件结构并<strong>生成解析规则</strong>（非直接解析数据）。生成的规则可编辑、可预览、可保存。AI 生成的规则需经用户确认后方可生效</td></tr>
+  <tr><td>6 份出库单全部兼容</td><td>通过配置不同的规则（可 AI 生成或手动配置），6 份出库单均可正确解析为结构化运单数据。每少兼容 1 份扣 3 分，兼容不足 5 份则本项 0 分</td></tr>
+  <tr><td>复杂结构处理</td><td>规则引擎能覆盖：头部跳过、尾部信息提取、跨行聚合、矩阵转置、多对一映射、默认值、静态值提取等复杂场景</td></tr>
+</table>
+
+<h3>考点 4：性能要求（20 分）</h3>
+<p><span class="tag tag-red">硬性指标</span> 本考区为量化考核，不达标即扣分。整体给分。</p>
+<table>
+  <tr><th>评分要点</th><th>细则</th></tr>
+  <tr><td>1000 单 10 秒内完成</td><td>导入 1000 条标准 Excel 数据，从上传到数据完整展示在预览列表中，整体耗时不超过 10 秒（不含 AI 解析时间）。前端渲染 1000 条数据必须在 3 秒内完成</td></tr>
+  <tr><td>大列表渲染优化</td><td>1000+ 条数据展示时不卡顿、不崩溃，采用虚拟列表或分批渲染等优化手段</td></tr>
+  <tr><td>文件解析性能</td><td>前端解析 Excel 文件本身（不涉及 AI 的部分）应在合理时间内完成，大文件不阻塞 UI</td></tr>
+  <tr><td>内存管理</td><td>处理大文件时无内存溢出，浏览器内存占用合理</td></tr>
+</table>
+
+
+
+<h3>考点 6：满足 V1 考试基础要求（附加项，0 分）</h3>
+<p><span class="tag">继承要求</span> 本考区为上次考试（V1）的完整功能要求，作为本次考试的基础能力参考。实现以上考点的过程中如已覆盖以下能力，视为满足。</p>
+<table>
+  <tr><th>评分要点</th><th>细则</th></tr>
+  <tr><td>错误处理与数据校验</td><td>必填校验（收发件信息、重量、件数、温层缺失标红）、格式校验（电话格式、重量正数、件数正整数、温层可选值）、全量错误一次性展示（标注行号、字段名、原因）、文件异常友好提示</td></tr>
+  <tr><td>预览列表与在线编辑</td><td>类 Excel 体验：表头固定、横向滚动、列宽合理；单元格点击编辑，Tab/回车切换；实时校验（编辑后即时标红+错误提示）；支持删除行/新增空行</td></tr>
+  <tr><td>导出功能</td><td>支持将预览数据（含修改）导出为 .xlsx 文件</td></tr>
+  <tr><td>外部编码重复检测</td><td>同批次内重复 + 与已存在数据重复，均在对应行高亮提示，标注与哪一行重复</td></tr>
+  <tr><td>数据库存储</td><td>通过 Vercel Marketplace 集成数据库（Neon / Supabase / Turso 等），运单数据写入数据库而非本地存储</td></tr>
+  <tr><td>运单列表查看</td><td>导入成功后可在"已导入运单"列表中查看历史记录，支持按外部编码/收件人姓名/提交时间筛选搜索，支持分页</td></tr>
+  <tr><td>代码质量</td><td>TypeScript 类型完整、组件拆分合理、目录结构清晰、大模型调用封装合理（API Key 安全、错误处理、超时控制）</td></tr>
+</table>
+<div class="alert alert-info">
+  <strong>说明：</strong>本考区不计入总分，仅作为功能完整度参考。实现考点 1-5 的过程中自然覆盖以下能力的，视为满足 V1 基础要求。
+</div>
+
+<!-- ====== 六、提交要求 ====== -->
+<h2>六、提交要求</h2>
+<ol>
+  <li><strong>在线地址</strong>：部署到 Vercel 后的可访问 URL</li>
+  <li><strong>源码仓库</strong>：Git 仓库链接（GitHub / GitLab / GITEE）</li>
+  <li><strong>大模型调用说明</strong>：说明使用的模型、Prompt 设计思路、API Key 配置方式</li>
+</ol>
+
+<!-- ====== 七、演示文件说明 ====== -->
+<h2>七、附：测试文件说明</h2>
+<p>随题附多种格式的复杂测试文件，用于验证大模型智能解析能力。文件特点：</p>
+
+<h4>格式覆盖</h4>
+<ul>
+  <li><span class="tag">Excel</span> 干扰头部 + 散落尾部 + 跨行聚合 + 矩阵转置 + 多Sheet + 卡片式 + 复合单元格</li>
+  <li><span class="tag">PDF</span> 多页多单 + 头部元信息 + 标准表格 + 底部签字区 + 独立签收页</li>
+</ul>
+
+<h4>难度特征</h4>
+<ul>
+  <li><strong>干扰头部</strong>：文件开头包含公司名称、日期、业务状态、配送信息等大量非数据字段</li>
+  <li><strong>尾部散落信息</strong>：收货人/电话/地址在数据区之外的独立行或文件末尾，需单独提取</li>
+  <li><strong>跨行聚合</strong>：同一配送单号下多行物品共享一组收货人信息，需按单号聚合</li>
+  <li><strong>矩阵转置</strong>：门店名/日期作为列头横向排列，需转置为独立运单记录</li>
+  <li><strong>多Sheet合并</strong>：每个Sheet是一个独立门店的出库单，需遍历所有Sheet合并解析</li>
+  <li><strong>卡片式堆叠</strong>：每条记录是一个独立"卡片"区域，非标准表格行，需按卡片边界拆分</li>
+  <li><strong>复合单元格</strong>：一个单元格内含"物品名x数量\n物品名x数量"的复合值，需拆分为多行</li>
+  <li><strong>PDF多独立订单</strong>：同一PDF内含多个独立签收单，每单有自己的收货人和物品明细</li>
+</ul>
+
+</div>
+</body>
+</html>

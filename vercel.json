@@ -1,0 +1,6 @@
+{
+  "buildCommand": "next build",
+  "framework": "nextjs",
+  "installCommand": "npm install",
+  "regions": ["hkg1"]
+}
