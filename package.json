@@ -10,7 +10,10 @@
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "db:seed": "npx tsx scripts/seed.ts",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "db:create-tables": "npx tsx scripts/create-tables.ts",
+    "db:seed-data": "npx tsx scripts/seed-data.ts",
+    "benchmark": "npx tsx scripts/benchmark.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

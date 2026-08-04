@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Upload, Settings, ListOrdered, Sparkles } from "lucide-react";
+import { Upload, Settings, ListOrdered, Sparkles, Activity, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "导入下单", icon: Upload },
+  { href: "/tasks", label: "任务进度", icon: ListOrdered },
+  { href: "/monitor", label: "监控看板", icon: Activity },
+  { href: "/traces", label: "Trace检索", icon: Search },
   { href: "/rules", label: "规则管理", icon: Settings },
   { href: "/orders", label: "运单列表", icon: ListOrdered },
 ];

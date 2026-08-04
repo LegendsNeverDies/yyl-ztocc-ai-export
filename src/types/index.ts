@@ -180,3 +180,129 @@ export interface ParsedFile {
 
 // ====== UI 状态 ======
 export type ImportStep = 'upload' | 'select-rule' | 'ai-generate' | 'preview' | 'submit';
+
+// ====== 异步导入链路类型 ======
+
+export type ImportTaskStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL_SUCCESS' | 'FAILED';
+export type BatchStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+export type OutboxStatus = 'PENDING' | 'SENT' | 'FAILED';
+
+// 任务创建响应
+export interface ImportTaskCreated {
+  task_id: string;
+  trace_id: string;
+  status: ImportTaskStatus;
+  total_rows: number;
+  total_batches: number;
+}
+
+// 任务进度响应
+export interface ImportTaskProgress {
+  task_id: string;
+  trace_id: string;
+  status: ImportTaskStatus;
+  file_name: string;
+  total_rows: number;
+  processed_rows: number;
+  success_rows: number;
+  failed_rows: number;
+  total_batches: number;
+  completed_batches: number;
+  degraded: boolean;
+  degraded_reason: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+  // 衍生指标
+  throughput?: number;        // 行/秒
+  eta_seconds?: number | null;
+}
+
+// 行级错误记录（DB 行）
+export interface ImportTaskErrorRow {
+  id: string;
+  task_id: string;
+  unit_id: string;
+  batch_index: number;
+  row_number: number;
+  field_name: string;
+  raw_value: string | null;
+  error_code: string;
+  error_reason: string;
+  trace_id: string;
+  created_at: string;
+}
+
+// 批次性能日志行
+export interface BatchPerformanceRow {
+  id: string;
+  task_id: string;
+  unit_id: string;
+  batch_index: number;
+  parse_duration_ms: number;
+  rule_duration_ms: number;
+  validate_duration_ms: number;
+  insert_duration_ms: number;
+  total_duration_ms: number;
+  row_count: number;
+  success_count: number;
+  failed_count: number;
+  status: string;
+  trace_id: string;
+  created_at: string;
+}
+
+// Trace 时间线事件
+export interface TraceEventRow {
+  id: string;
+  trace_id: string;
+  task_id: string | null;
+  unit_id: string | null;
+  event_name: string;
+  event_status: string | null;
+  message: string | null;
+  occurred_at: string;
+}
+
+// 监控聚合
+export interface MonitorSummary {
+  throughput: { minute: string; success_rows: number }[];  // 最近5分钟每分钟成功行数
+  queue_backlog: {
+    pending_batches: number;
+    pending_rows: number;
+    status: 'ok' | 'warning' | 'critical';
+  };
+  stage_duration: {
+    stage: string;
+    p50: number;
+    p95: number;
+    p99: number;
+  }[];
+  error_distribution: { error_code: string; count: number; reason: string }[];
+  slow_batches_top10: BatchPerformanceRow[];
+  failed_tasks_recent: { id: string; file_name: string; failed_rows: number; created_at: string }[];
+}
+
+// 错误码枚举
+export const ERROR_CODES = {
+  SKU_NOT_EXIST: 'E001',
+  REQUIRED_MISSING: 'E002',
+  PHONE_FORMAT: 'E003',
+  QTY_NOT_POSITIVE: 'E004',
+  EXTERNAL_CODE_DUP: 'E005',
+  RULE_MAP_FAILED: 'E006',
+  DB_INSERT_FAILED: 'E007',
+  FILE_FORMAT: 'E008',
+} as const;
+
+export const ERROR_CODE_LABELS: Record<string, string> = {
+  E001: 'SKU 不存在',
+  E002: '必填字段缺失',
+  E003: '电话格式错误',
+  E004: '数量不是正数',
+  E005: '外部编码重复',
+  E006: '规则映射失败',
+  E007: '数据库写入失败',
+  E008: '文件格式不支持',
+};

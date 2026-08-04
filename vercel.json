@@ -2,5 +2,11 @@
   "buildCommand": "next build",
   "framework": "nextjs",
   "installCommand": "npm install",
-  "regions": ["hkg1"]
+  "regions": ["hkg1"],
+  "crons": [
+    {
+      "path": "/api/worker/run",
+      "schedule": "*/1 * * * *"
+    }
+  ]
 }

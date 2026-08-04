@@ -7,11 +7,9 @@ import { RuleSelector } from "@/components/upload/rule-selector";
 import { ProgressBar } from "@/components/shared/progress-bar";
 import { useToast } from "@/components/shared/toast";
 import { readFile } from "@/lib/file-reader";
-import { parseFile } from "@/lib/parse-engine";
-import { validateOrders, checkExternalCodeDuplicates, checkReceiverConsistency } from "@/lib/validators";
-import { getAllRules, getExistingExternalCodes } from "@/lib/server-actions";
-import type { ParsedFile, ParseRule, OrderRow, ParseProgress } from "@/types";
-import { Sparkles, FileText, Database, Check, ArrowRight } from "lucide-react";
+import { getAllRules } from "@/lib/server-actions";
+import type { ParsedFile, ParseRule, ParseProgress } from "@/types";
+import { Sparkles, FileText, Database, Check, ArrowRight, Zap } from "lucide-react";
 
 export default function HomePage() {
   const router = useRouter();
@@ -28,6 +26,7 @@ export default function HomePage() {
     status: "idle",
   });
   const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const resetUpload = useCallback(() => {
     setFile(null);
@@ -57,56 +56,41 @@ export default function HomePage() {
     }
   }, [showToast]);
 
-  const handleParseWithRule = useCallback(async (rule: ParseRule) => {
-    if (!parsedFile) return;
+  const handleSelectRule = useCallback((rule: ParseRule) => {
     setSelectedRule(rule);
-    setLoading(true);
-    const tick = () => new Promise((r) => setTimeout(r, 0));
+  }, []);
 
-    // 阶段1：解析
-    setProgress({ current: 0, total: parsedFile.rows.length, percent: 15, status: "parsing" });
-    await tick();
-    const startTime = performance.now();
-    const orderRows = parseFile(parsedFile, rule);
-    const duration = performance.now() - startTime;
+  // 提交：创建异步导入任务，跳转任务进度页
+  const handleCreateTask = useCallback(async () => {
+    if (!file || !selectedRule) return;
+    setSubmitting(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("rule_id", selectedRule.id);
+      formData.append("batch_size", "1000");
 
-    // 阶段2：本地校验
-    setProgress({ current: orderRows.length, total: orderRows.length, percent: 60, status: "parsing" });
-    await tick();
-    const validationErrors = validateOrders(orderRows);
-    const consistencyErrors = checkReceiverConsistency(orderRows);
-
-    // 阶段3：数据库重复检测（仅查本批涉及的编码）
-    setProgress({ current: orderRows.length, total: orderRows.length, percent: 85, status: "parsing" });
-    const codes = Array.from(new Set(orderRows.map((r) => r.externalCode?.trim()).filter(Boolean) as string[]));
-    const existingCodes = await getExistingExternalCodes(codes).catch(() => new Set<string>());
-    const dupErrors = checkExternalCodeDuplicates(orderRows, existingCodes);
-    const allErrors = [...validationErrors, ...consistencyErrors, ...dupErrors];
-
-    // 完成
-    setProgress({ current: orderRows.length, total: orderRows.length, percent: 100, status: "done" });
-
-    sessionStorage.setItem(
-      "previewData",
-      JSON.stringify({
-        rows: orderRows,
-        errors: allErrors,
-        fileName: parsedFile.fileName,
-        ruleName: rule.name,
-        parseDuration: Math.round(duration),
-      })
-    );
-
-    showToast(`解析完成：${orderRows.length} 条记录，${allErrors.length} 处错误`, allErrors.length ? "info" : "success");
-    setLoading(false);
-
-    router.push("/preview");
-  }, [parsedFile, router, showToast]);
+      const res = await fetch("/api/import-tasks", { method: "POST", body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `创建任务失败 (${res.status})`);
+      }
+      const data = await res.json();
+      showToast(`任务已创建：${data.total_rows} 行，${data.total_batches} 个批次`, "success");
+      // 跳转任务进度页
+      router.push(`/tasks/${data.task_id}`);
+    } catch (err) {
+      console.error(err);
+      showToast(err instanceof Error ? err.message : "创建任务失败", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [file, selectedRule, router, showToast]);
 
   const steps = [
     { key: "upload", label: "上传文件", desc: "Excel / PDF 出库单" },
     { key: "rule", label: "选择规则", desc: "已有规则或 AI 新建" },
-    { key: "preview", label: "预览提交", desc: "编辑后一键下单" },
+    { key: "submit", label: "创建任务", desc: "异步处理，实时进度" },
   ];
   const stepStatus = (key: string): "done" | "current" | "upcoming" => {
     if (key === "upload") return parsedFile ? "done" : "current";
@@ -158,21 +142,21 @@ export default function HomePage() {
 
           <div className="card !p-5">
             <div className="mb-3 flex items-center gap-2">
-              <ArrowRight className="h-4 w-4 text-[#0fc6c2]" />
-              <h2 className="text-sm font-semibold text-[#1d2129]">快速开始</h2>
+              <Zap className="h-4 w-4 text-[#0fc6c2]" />
+              <h2 className="text-sm font-semibold text-[#1d2129]">异步事件驱动</h2>
             </div>
             <div className="space-y-2.5 text-xs text-[#4e5969]">
               <div className="flex items-start gap-2">
                 <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#e8fafa] text-[10px] font-bold text-[#0fc6c2]">1</span>
-                <span>上传任意格式的出库单文件，支持拖拽或点击上传</span>
+                <span>上传文件后 1 秒内返回 task_id，不阻塞等待</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#e8fafa] text-[10px] font-bold text-[#0fc6c2]">2</span>
-                <span>选择已有规则，或新建规则让 AI 自动分析结构</span>
+                <span>后台 Worker 分批处理，批量校验 SKU 与写入</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#e8fafa] text-[10px] font-bold text-[#0fc6c2]">3</span>
-                <span>预览解析结果，在线编辑修正后一键提交</span>
+                <span>任务进度页实时展示处理进度、错误明细、性能</span>
               </div>
             </div>
           </div>
@@ -185,7 +169,7 @@ export default function HomePage() {
               <Sparkles className="mr-2 inline-block h-7 w-7 text-[#0fc6c2]" />
               万能导入 V2
             </h1>
-            <p className="mt-2 text-sm text-[#86909c]">智能多格式批量下单系统 —— 上传文件，AI 自动解析，一键下单</p>
+            <p className="mt-2 text-sm text-[#86909c]">异步事件驱动批量下单系统 —— 上传即返回，全链路可观测</p>
           </div>
 
           {/* 步骤一：上传 */}
@@ -228,17 +212,54 @@ export default function HomePage() {
                 rules={rules}
                 selectedRule={selectedRule}
                 parsedFile={parsedFile}
-                onSelectRule={handleParseWithRule}
+                onSelectRule={handleSelectRule}
                 loading={loading}
               />
-              {loading && (
-                <div className="mt-4">
-                  <ProgressBar
-                    percent={progress.percent}
-                    label={`正在解析... ${progress.current}/${progress.total}`}
-                  />
+            </div>
+          )}
+
+          {/* 步骤三：创建任务 */}
+          {selectedRule && (
+            <div className="card animate-fade-in">
+              <div className="mb-4 flex items-center gap-2">
+                <Zap className="h-5 w-5 text-[#0fc6c2]" />
+                <h2 className="text-base font-semibold text-[#1d2129]">步骤三：创建异步导入任务</h2>
+              </div>
+              <div className="space-y-3">
+                <div className="rounded-md bg-[#f7f8fa] p-3 text-sm text-[#4e5969]">
+                  <div className="flex justify-between py-1">
+                    <span className="text-[#86909c]">文件</span>
+                    <span className="font-medium text-[#1d2129]">{file?.name}</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-[#86909c]">规则</span>
+                    <span className="font-medium text-[#1d2129]">{selectedRule.name}</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-[#86909c]">总行数</span>
+                    <span className="font-medium text-[#1d2129]">{parsedFile?.rows.length ?? 0} 行</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-[#86909c]">批次大小</span>
+                    <span className="font-medium text-[#1d2129]">1000 行/批</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-[#86909c]">预计批次</span>
+                    <span className="font-medium text-[#1d2129]">{Math.max(1, Math.ceil((parsedFile?.rows.length ?? 0) / 1000))} 个</span>
+                  </div>
                 </div>
-              )}
+                <button
+                  onClick={handleCreateTask}
+                  disabled={submitting}
+                  className="btn-primary w-full"
+                >
+                  {submitting ? "正在创建任务..." : "创建导入任务"}
+                  {!submitting && <ArrowRight className="ml-1 inline-block h-4 w-4" />}
+                </button>
+                <p className="text-center text-xs text-[#86909c]">
+                  创建后立即返回 task_id，后台异步处理，可在任务进度页查看实时进度
+                </p>
+              </div>
             </div>
           )}
         </section>

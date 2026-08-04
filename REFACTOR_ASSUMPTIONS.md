@@ -1,0 +1,210 @@
+# V2 下单流程异步事件驱动重构 —— 假设说明
+
+文档日期：2026/08/04
+版本：V4.0（异步事件驱动与可观测性版）
+
+---
+
+## 1. 为什么选择异步事件驱动，而不是继续同步处理
+
+**痛点**：原 V2 在一次 HTTP 请求中完成"文件读取 → 规则解析 → 逐行校验 → 逐行写库"，10,000 行数据即使每行 200ms 也要 30 分钟，必然触发 Vercel Serverless 请求超时（默认 10s~60s），用户无法完成下单。
+
+**选择异步的理由**：
+- Vercel Serverless 单请求不适合长阻塞任务；
+- 大促 10,000 单/分钟的目标，必须并行处理；
+- 失败需要可重试、可定位，同步链路一旦中断无法恢复；
+- 前端需要进度感知，同步只能显示 loading。
+
+**何时同步反而更简单可靠**：
+- 单文件 < 100 行的小批量导入；
+- 内部管理后台低频操作；
+- 需要立即看到完整结果且可接受短等待的场景；
+- 调试和开发阶段（同步链路更容易断点调试）。
+此时同步 + 单事务回滚更简单，不需要引入队列、幂等、状态聚合的复杂度。
+
+---
+
+## 2. 处理单元大小如何设计，为什么这样设计
+
+**设计**：默认 **1000 行/批**，可通过上传接口 `batch_size` 参数调整。
+
+**理由**：
+- Neon HTTP 单次请求有超时限制（约 10s），1000 行的批量校验 + 写入实测 < 3s，留足余量；
+- 批次太小（如 100 行）会导致批次数过多，Worker 调度开销和 DB 更新次数增加；
+- 批次太大（如 5000 行）单次写入内存压力大，失败重试成本高（整批重做）；
+- 1000 行/批下 10,000 行 = 10 批，单 Worker 串行处理约 30-50s，满足 ≤ 60s 目标；
+- 若需更快，可减小 batch_size 增加并发，或部署多 Worker。
+
+**动态调整**：上传接口支持 `batch_size` 参数，压测时可调优。
+
+---
+
+## 3. Worker / Consumer 的容量规划
+
+**部署模式**：Vercel Serverless 函数 + Cron 定时触发（每分钟 1 次）。
+- 每次调用 `runWorker()` 最多处理 5 个批次（`MAX_BATCHES_PER_RUN = 5`）；
+- Cron 每分钟触发一次，理论吞吐 = 5 批/分钟 × 1000 行/批 = 5000 行/分钟；
+- **前端加速**：任务进度页轮询时会主动 `POST /api/worker/run` 触发 Worker（每 2 秒一次），实际吞吐远高于 Cron 频率；
+- 压测脚本也会主动触发 Worker。
+
+**容量推导**（10,000 行 ≤ 60s）：
+- 10 批 × 1000 行，单批处理约 3-5s（解析 0.5s + 规则 0.5s + 校验 1s + 写入 2s）；
+- 单 Worker 串行 10 批 ≈ 30-50s；
+- 前端轮询触发 + Cron 并发，实际可在 30-40s 内完成。
+
+**扩展性**：如需更高吞吐，可：
+- 部署常驻 Worker 到 Railway/Render，多实例并发消费；
+- 使用 BullMQ + Redis 实现真正的队列并发；
+- Vercel Cron 频率无法超过每分钟 1 次，故高频触发依赖前端或外部定时器。
+
+---
+
+## 4. 10,000 单/分钟的性能推导
+
+| 推导项 | 说明 |
+|---|---|
+| 数据量 | 10,000 行 Excel，1000 行/批 → 10 批 |
+| 处理单元 | 按 rowIndex 切片，每批 1000 行 |
+| 并发模型 | 单 Worker 函数内串行处理 5 批/次；前端轮询每 2s 触发一次 → 实际并发度 1-2 |
+| 数据库压力 | 每批 1 次 SKU 批量 IN 查询（最多 1000 个 code）+ 1 次外部编码查询 + 批量 INSERT（shipment 100/批，order 500/批） |
+| 峰值连接数 | Neon HTTP 无连接池（每次请求独立），Drizzle 内部并发受限于 Promise.all 中的 batch 数 |
+| 单次查询量 | SKU 查询 ≤ 1000 codes；写入 ≤ 100 shipments 或 500 orders |
+| 失败成本 | 单批失败只影响该批 1000 行，retryCount+1，可恢复重试 |
+| 性能结论 | 10 批 × ~4s/批 = 40s（串行）；前端触发并发后 ≤ 30s，满足 ≤ 60s |
+
+---
+
+## 5. 数据库连接池和 Worker 并发如何控制
+
+**Neon Serverless HTTP 特性**：
+- 无传统连接池，每个 HTTP 请求独立；
+- Drizzle ORM 的 `db.transaction()` 通过批量 HTTP 请求模拟事务；
+- 并发受限于 `Promise.all` 中的批量数。
+
+**控制策略**：
+- 单 Worker 一次最多处理 5 批（`MAX_BATCHES_PER_RUN`）；
+- 批量写入：shipment 100/批、order 500/批，避免单次请求过大；
+- 批量校验：单次 SKU IN 查询 ≤ 1000 codes；
+- 避免逐行查询和逐行 INSERT；
+- 前端轮询触发 Worker 时，若已有 Worker 在运行，新的调用会抢占不同批次（`FOR UPDATE SKIP LOCKED`），天然避免重复处理。
+
+---
+
+## 6. Outbox 如何避免"任务创建成功但消息丢失"
+
+**机制**：Transactional Outbox 模式。
+- 上传接口在 `db.transaction()` 内同时写入：`import_tasks` + `import_task_batches` + `event_outbox` + `trace_events`；
+- 这四类写入在同一事务内，要么全部成功要么全部回滚；
+- 即使服务在事务提交后、Dispatcher 投递前宕机，`event_outbox` 中仍有 PENDING 记录；
+- Dispatcher 恢复后会继续轮询 PENDING 事件并标记为 SENT。
+
+**Worker 消费**：
+- Worker 不依赖 Outbox 事件触发，而是直接轮询 `import_task_batches` 表中 status='PENDING' 的批次；
+- Outbox 事件作为"可靠事件记录"和 trace 证据，保证事件不丢失；
+- 这种设计即使 Dispatcher 完全不工作，Worker 仍能正常消费批次（Outbox 是审计+追踪层，不是消息传递的唯一通道）。
+
+---
+
+## 7. 处理单元 Job 如何做到幂等
+
+**幂等键**：`(task_id, unit_id)`，其中 `unit_id = task_id前8位 + _b + batch_index`。
+
+**幂等保证**：
+1. **数据库唯一约束**：`import_task_batches` 表有 `(task_id, unit_id)` 唯一索引，重复插入会失败；
+2. **状态检查**：Worker 处理前先查批次状态，若已是 `COMPLETED` 直接返回；
+3. **原子抢占**：用 `UPDATE ... SET status='PROCESSING' WHERE status='PENDING' RETURNING` 原子抢占，多个 Worker 并发不会抢到同一批；
+4. **进度累计**：任务级 `processed_rows/success_rows/failed_rows` 使用绝对值（由所有批次聚合计算），而非增量累加，避免重复消费导致重复累计；
+5. **写入幂等**：批量 UPSERT 基于 `external_code` 业务键（当前实现为 INSERT，若需严格幂等可改为 ON CONFLICT DO UPDATE）。
+
+---
+
+## 8. 部分行失败时为什么允许成功行继续入库
+
+**设计**：部分行失败不阻塞成功行。
+- 单批内：校验失败的行写入 `import_task_errors`，校验通过的行批量写入运单表；
+- 任务级：所有批次完成后，若有失败行则状态为 `PARTIAL_SUCCESS`，而非 `FAILED`；
+- 只有当某批全部行失败且无成功写入时，该批才标记为 `FAILED`。
+
+**理由**：
+- 大促场景下，10,000 行中可能有少量 SKU 不存在或电话格式错误，整批回滚会导致"因 1 行错误丢失 9999 行有效数据"；
+- 失败行有详细错误明细，用户可修复后重新上传或单独补录；
+- 业务上"部分成功"比"全部失败"更可接受；
+- 数据库层面，成功行已落库，失败行有记录，不会数据丢失。
+
+---
+
+## 9. SKU 校验降级的触发条件和风险提示
+
+**触发条件**：
+- SKU 主数据查询超时（`SKU_QUERY_TIMEOUT_MS = 3000ms`）；
+- 或数据库连接失败抛异常。
+
+**降级行为**：
+- 跳过 SKU 主数据校验，仅做本地格式校验（必填、电话格式、数量正数）；
+- 任务标记 `degraded=true`，记录 `degraded_reason`；
+- 写入 trace 事件 `ImportTaskDegraded`；
+- 前端任务详情页显示醒目橙色警告。
+
+**风险提示**：
+- 降级模式下可能写入不存在的 SKU，需后续复核；
+- 服务恢复后新任务自动恢复正常校验（降级是任务级，不全局持久化）。
+
+**后续补校验设计**（可选）：
+- 可提供一个 `POST /api/import-tasks/:taskId/revalidate` 接口，对降级任务的成功行重新校验 SKU；
+- 标记校验失败的行到 `import_task_errors`，供用户修复；
+- 本次实现未做自动补校验，需人工触发。
+
+---
+
+## 10. 错误日志中敏感数据如何脱敏
+
+**脱敏规则**（`maskSensitive` 函数）：
+- `receiverPhone`：保留前 3 后 4，中间用 `****` 替换，如 `138****1234`；
+- `receiverAddress`：保留前 6 字符，其余用 `***` 替换；
+- 其他字段不脱敏（SKU 编码、门店名等非敏感）。
+
+**记录位置**：
+- `import_task_errors.raw_value` 字段存储脱敏后的值；
+- 错误原因 `error_reason` 中不包含原始敏感值。
+
+**平衡**：
+- 脱敏后仍能定位到具体行和字段，满足排障需求；
+- 原始值不落库，避免敏感信息泄露；
+- 如需完整原始值用于修复，可考虑加密存储 + 权限控制（本次未实现）。
+
+---
+
+## 11. 压测数据如何生成、如何清理
+
+**生成**：`npx tsx scripts/seed-data.ts`
+- 清空 `sku_master` 表（`TRUNCATE RESTART IDENTITY`）；
+- 灌入 20,000 条 SKU（`SKU_00001` ~ `SKU_20000`）；
+- 生成 `test-data/10000-orders.xlsx`（10,000 行，含 1% 非法 SKU）；
+- 生成 `test-data/bench-rule.json`（配套解析规则）。
+
+**清理**：
+- SKU 主数据：重复运行 `seed-data.ts` 会先 TRUNCATE 再插入，无脏数据累积；
+- 导入任务数据：可通过 SQL 清理 `DELETE FROM import_tasks WHERE created_at < now() - interval '7 days'`（级联删除 batches/errors）；
+- 性能日志：`DELETE FROM batch_performance_log WHERE created_at < now() - interval '30 days'`；
+- Outbox：`DELETE FROM event_outbox WHERE status = 'SENT' AND sent_at < now() - interval '7 days'`；
+- Trace 事件：`DELETE FROM trace_events WHERE occurred_at < now() - interval '7 days'`。
+
+**建议归档策略**：
+- 超过 30 天的已完成任务数据归档到冷存储；
+- Outbox SENT 记录保留 7 天用于审计；
+- 性能日志保留 30 天用于趋势分析。
+
+---
+
+## 12. 如果可以向产品经理或运维团队提问，会问哪些问题
+
+1. **业务**：10,000 单/分钟是持续峰值还是瞬时峰值？持续时间多长？是否需要支持 50,000 单/分钟的未来扩展？
+2. **业务**：部分行失败时，业务方更希望"全部成功才入库"还是"成功行先入库"？不同业务场景（大促 vs 日常）策略是否不同？
+3. **业务**：降级模式下写入的未校验 SKU，业务方是否接受？还是应该直接拒绝整批？
+4. **运维**：Vercel Cron 每分钟 1 次的触发频率是否够用？是否可以部署常驻 Worker 到 Railway/Render？
+5. **运维**：Neon Postgres 的连接数和计算资源配额是多少？是否需要升级到更高套餐？
+6. **运维**：是否需要接入钉钉/飞书机器人告警？告警阈值（队列积压、失败率）如何设定？
+7. **产品**：任务进度页的"预计剩余时间"需要多准确？当前基于历史吞吐估算，是否需要更精确的模型？
+8. **产品**：Trace 检索是否需要支持按文件名、行号范围搜索？当前仅支持 trace_id。
+9. **安全**：错误明细中的原始值脱敏策略，是否满足合规要求？是否需要加密存储原始值？
+10. **运维**：压测数据（20,000 SKU + 10,000 运单）是否需要定期刷新？还是固定数据集即可？

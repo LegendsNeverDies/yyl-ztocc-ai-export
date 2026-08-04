@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { shipments, orders } from "@/lib/db-schema";
 import { eq } from "drizzle-orm";
 import { checkExternalAuth, unauthorizedResponse } from "@/lib/external-auth";
+import type { DbOrderItem } from "@/types";
 
 /**
  * GET /api/external/waybills/:code/skus?skuCode=XXX
@@ -30,7 +31,7 @@ export async function GET(
   const skus = await db.select().from(orders).where(eq(orders.shipmentId, row.id));
 
   if (skuCode) {
-    const found = skus.find((s) => s.skuCode === skuCode);
+    const found = skus.find((s: DbOrderItem) => s.skuCode === skuCode);
     return NextResponse.json({
       exists: true,
       belongs: !!found,

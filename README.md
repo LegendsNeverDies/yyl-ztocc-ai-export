@@ -1,0 +1,155 @@
+# 万能导入 V2 — 异步事件驱动批量下单系统
+
+基于 Next.js 16 App Router + TypeScript，将同步阻塞式导入链路重构为可支撑高并发的异步事件驱动架构。
+
+## 核心特性
+
+- **上传即返回**：上传接口 P95 ≤ 1 秒，立即返回 `task_id`
+- **异步事件驱动**：Transactional Outbox + Worker 轮询消费，不阻塞用户请求
+- **批量处理**：批量 SKU 校验 + 批量 UPSERT，禁止逐行查询/写库
+- **全链路可观测**：traceId 贯穿 API → Outbox → Worker → DB，监控看板 + Trace 检索
+- **幂等与恢复**：批次级幂等，卡死自动恢复，部分行失败不阻塞成功行
+- **容灾降级**：SKU 查询超时自动降级，前端明确提示风险
+
+## 架构概览
+
+```
+用户上传 → POST /api/import-tasks (≤1s 返回 task_id)
+                ↓ (同事务)
+    import_tasks + import_task_batches + event_outbox + trace_events
+                ↓
+    Outbox Dispatcher (标记 SENT)
+                ↓
+    Worker (轮询 PENDING 批次)
+        ├─ 复用 V2 规则引擎解析
+        ├─ 批量 SKU 校验 (IN 查询)
+        ├─ 批量写入运单 (主子表)
+        ├─ 错误明细写入 (行级)
+        ├─ 性能日志写入
+        └─ 任务状态聚合
+                ↓
+    前端轮询任务进度 (每 2s)
+```
+
+## 快速开始
+
+### 1. 环境变量（`.env.local`）
+
+```bash
+DATABASE_URL=postgresql://...        # Neon Postgres 连接串
+DEEPSEEK_API_URL=...                 # AI 规则生成（可选）
+DEEPSEEK_API_KEY=...
+DEEPSEEK_MODEL=deepseek-chat
+EXTERNAL_API_KEY=v2-external-key-2026  # V3 调用用
+WORKER_API_KEY=worker-key-2026        # Worker 触发鉴权（可选）
+```
+
+### 2. 安装与建表
+
+```bash
+npm install
+npm run db:create-tables    # 创建所有表（含新增异步链路表）
+npm run db:seed             # 初始化 6 个内置解析规则
+```
+
+### 3. 压测数据准备
+
+```bash
+npm run db:seed-data         # 生成 20,000 SKU + 10,000 行 Excel 压测文件
+```
+
+生成物：
+- `sku_master` 表：20,000 条 SKU 主数据（`SKU_00001` ~ `SKU_20000`）
+- `test-data/10000-orders.xlsx`：10,000 行运单（含 1% 非法 SKU）
+- `test-data/bench-rule.json`：配套解析规则
+
+### 4. 启动开发服务器
+
+```bash
+npm run dev    # http://localhost:3000
+```
+
+### 5. 压测验证
+
+```bash
+npm run benchmark    # 上传 10,000 行文件并测量全链路耗时
+```
+
+压测报告输出到 `test-data/benchmark-report.json`。
+
+## 功能页面
+
+| 路径 | 说明 |
+|---|---|
+| `/` | 导入下单（上传文件 → 选规则 → 创建异步任务） |
+| `/tasks` | 任务列表 |
+| `/tasks/[taskId]` | 任务进度详情（进度、错误明细、批次性能） |
+| `/monitor` | 监控看板（吞吐、积压、阶段耗时、错误分布） |
+| `/traces` | Trace 检索（按 trace_id 查看时间线） |
+| `/rules` | 规则管理 |
+| `/orders` | 运单列表 |
+
+## API 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/import-tasks` | 上传文件，创建异步导入任务 |
+| GET | `/api/import-tasks` | 任务列表 |
+| GET | `/api/import-tasks/:taskId` | 查询任务进度 |
+| GET | `/api/import-tasks/:taskId/errors` | 查询错误明细（分页、筛选） |
+| GET | `/api/import-tasks/:taskId/batches` | 查询批次性能日志 |
+| GET | `/api/traces/:traceId` | Trace 时间线检索 |
+| GET | `/api/import-monitor/summary` | 监控聚合指标 |
+| POST/GET | `/api/worker/run` | 触发 Worker（Cron 或手动） |
+
+## 部署
+
+### Vercel
+
+```bash
+vercel --prod
+```
+
+`vercel.json` 已配置：
+- Cron 每分钟触发 `/api/worker/run`
+- 区域 `hkg1`
+- 构建命令 `next build`
+
+### Worker 触发
+
+Vercel Cron 每分钟触发一次 Worker。任务进行中时，前端任务进度页会每 2 秒主动触发一次 Worker 以加速消费。如需更高吞吐，可：
+- 部署常驻 Worker 到 Railway/Render，定时调用 `/api/worker/run`；
+- 或使用 BullMQ + Redis 实现真正的队列并发（需额外服务）。
+
+## 数据库表
+
+| 表名 | 说明 |
+|---|---|
+| `parse_rules` | 解析规则（复用） |
+| `shipments` | 运单主表（复用） |
+| `orders` | SKU 明细子表（复用） |
+| `sku_master` | SKU 主数据（压测用） |
+| `import_tasks` | 导入任务主表 |
+| `import_task_batches` | 处理单元（批次）状态 |
+| `import_task_errors` | 行级错误明细 |
+| `event_outbox` | 本地可靠事件（Outbox） |
+| `batch_performance_log` | 批次性能日志 |
+| `trace_events` | 链路时间线事件 |
+
+## 关键脚本
+
+```bash
+npm run db:create-tables    # 建表（幂等）
+npm run db:seed             # 初始化解析规则
+npm run db:seed-data        # 生成压测数据
+npm run benchmark           # 压测
+npm run dev                 # 开发服务器
+npm run build               # 生产构建
+npm run lint                # 代码检查
+```
+
+## 文档
+
+- [重构假设说明](./REFACTOR_ASSUMPTIONS.md) — 架构决策、容量推导、幂等设计、降级策略
+- [AGENTS.md](./AGENTS.md) — Next.js 16 注意事项
+- [CLAUDE.md](./CLAUDE.md) — V2 原始架构说明
