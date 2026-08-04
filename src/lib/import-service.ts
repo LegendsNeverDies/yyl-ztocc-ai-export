@@ -12,6 +12,7 @@ import { eq, and, desc, inArray, lte, gte, sql as drizzleSql } from "drizzle-orm
 import { generateId } from "@/lib/utils";
 import { serializeParsedFile, deserializeParsedFile } from "@/lib/import-serialize";
 import type { ParsedFile, ParseRule, ImportTaskProgress, ImportTaskErrorRow, BatchPerformanceRow, TraceEventRow, MonitorSummary } from "@/types";
+import { ERROR_CODE_LABELS } from "@/types";
 
 // ====== 任务创建 ======
 export interface CreateTaskParams {
@@ -258,6 +259,214 @@ export async function getTraceEvents(traceId: string): Promise<TraceEventRow[]> 
   }));
 }
 
+// ====== Trace 多条件搜索 ======
+// 模块九要求：支持按 task_id / trace_id / 文件名 / 批次号 / 行号范围 / 错误码 搜索
+export interface TraceSearchParams {
+  trace_id?: string;
+  task_id?: string;
+  file_name?: string;
+  batch_index?: number;
+  row_start?: number;
+  row_end?: number;
+  error_code?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface TraceSearchResultItem {
+  type: "trace_event" | "error";
+  trace_id: string;
+  task_id: string | null;
+  unit_id: string | null;
+  batch_index: number | null;
+  row_number?: number;
+  field_name?: string;
+  raw_value?: string | null;
+  error_code?: string;
+  error_reason?: string;
+  event_name?: string;
+  event_status?: string | null;
+  message?: string | null;
+  occurred_at: string;
+}
+
+export async function searchTraces(params: TraceSearchParams): Promise<{
+  rows: TraceSearchResultItem[];
+  total: number;
+}> {
+  const conditions = [];
+  let hasFilter = false;
+
+  // 构建 trace_events 查询条件
+  if (params.trace_id) {
+    conditions.push(eq(traceEvents.traceId, params.trace_id));
+    hasFilter = true;
+  }
+  if (params.task_id) {
+    conditions.push(eq(traceEvents.taskId, params.task_id));
+    hasFilter = true;
+  }
+
+  const traceResults: TraceSearchResultItem[] = [];
+  let errorResults: TraceSearchResultItem[] = [];
+
+  // 1. 查询 trace_events（按 trace_id / task_id）
+  if (conditions.length > 0) {
+    const where = and(...conditions);
+    const traceRows = await db
+      .select()
+      .from(traceEvents)
+      .where(where)
+      .orderBy(desc(traceEvents.occurredAt))
+      .limit(params.pageSize)
+      .offset((params.page - 1) * params.pageSize);
+
+    traceResults.push(...traceRows.map((r) => ({
+      type: "trace_event" as const,
+      trace_id: r.traceId,
+      task_id: r.taskId ?? null,
+      unit_id: r.unitId ?? null,
+      batch_index: null,
+      event_name: r.eventName,
+      event_status: r.eventStatus ?? null,
+      message: r.message ?? null,
+      occurred_at: r.occurredAt?.toISOString() ?? "",
+    })));
+  }
+
+  // 2. 查询错误明细（支持 file_name / batch_index / row_start~row_end / error_code）
+  // file_name 需要 join import_tasks 表
+  const errorConditions = [];
+  if (params.task_id) {
+    errorConditions.push(eq(importTaskErrors.taskId, params.task_id));
+    hasFilter = true;
+  }
+  if (params.batch_index != null) {
+    errorConditions.push(eq(importTaskErrors.batchIndex, params.batch_index));
+    hasFilter = true;
+  }
+  if (params.row_start != null) {
+    errorConditions.push(gte(importTaskErrors.rowNumber, params.row_start));
+    hasFilter = true;
+  }
+  if (params.row_end != null) {
+    errorConditions.push(lte(importTaskErrors.rowNumber, params.row_end));
+    hasFilter = true;
+  }
+  if (params.error_code) {
+    errorConditions.push(eq(importTaskErrors.errorCode, params.error_code));
+    hasFilter = true;
+  }
+
+  if (errorConditions.length > 0) {
+    const errorWhere = and(...errorConditions);
+    const [errCountResult] = await db
+      .select({ count: drizzleSql<number>`count(*)` })
+      .from(importTaskErrors)
+      .where(errorWhere)
+      .execute();
+    const errTotal = Number(errCountResult?.count || 0);
+
+    const errRows = await db
+      .select()
+      .from(importTaskErrors)
+      .where(errorWhere)
+      .orderBy(importTaskErrors.rowNumber)
+      .limit(params.pageSize)
+      .offset((params.page - 1) * params.pageSize);
+
+    errorResults = errRows.map((r) => ({
+      type: "error" as const,
+      trace_id: r.traceId,
+      task_id: r.taskId,
+      unit_id: r.unitId,
+      batch_index: r.batchIndex,
+      row_number: r.rowNumber,
+      field_name: r.fieldName,
+      raw_value: r.rawValue,
+      error_code: r.errorCode,
+      error_reason: r.errorReason,
+      occurred_at: r.createdAt?.toISOString() ?? "",
+    }));
+
+    // 如果只查错误明细，返回错误总数
+    if (traceResults.length === 0) {
+      return { rows: errorResults, total: errTotal };
+    }
+  }
+
+  // 3. file_name 搜索：先从 import_tasks 找到匹配的 task_id，再查 trace_events
+  if (params.file_name && !hasFilter) {
+    hasFilter = true;
+    const pattern = "%" + params.file_name + "%";
+    const taskRows = await db
+      .select({ id: importTasks.id, traceId: importTasks.traceId })
+      .from(importTasks)
+      .where(drizzleSql`${importTasks.fileName} ILIKE ${pattern}`)
+      .limit(20);
+
+    const traceIds = taskRows.map((r) => r.traceId);
+    const taskIds = taskRows.map((r) => r.id);
+
+    if (traceIds.length > 0) {
+      const traceRows = await db
+        .select()
+        .from(traceEvents)
+        .where(inArray(traceEvents.traceId, traceIds))
+        .orderBy(desc(traceEvents.occurredAt))
+        .limit(params.pageSize)
+        .offset((params.page - 1) * params.pageSize);
+      traceResults.push(...traceRows.map((r) => ({
+        type: "trace_event" as const,
+        trace_id: r.traceId,
+        task_id: r.taskId ?? null,
+        unit_id: r.unitId ?? null,
+        batch_index: null,
+        event_name: r.eventName,
+        event_status: r.eventStatus ?? null,
+        message: r.message ?? null,
+        occurred_at: r.occurredAt?.toISOString() ?? "",
+      })));
+
+      // 同时查错误明细
+      if (taskIds.length > 0) {
+        const errRows = await db
+          .select()
+          .from(importTaskErrors)
+          .where(inArray(importTaskErrors.taskId, taskIds))
+          .orderBy(importTaskErrors.rowNumber)
+          .limit(params.pageSize)
+          .offset((params.page - 1) * params.pageSize);
+        errorResults = errRows.map((r) => ({
+          type: "error" as const,
+          trace_id: r.traceId,
+          task_id: r.taskId,
+          unit_id: r.unitId,
+          batch_index: r.batchIndex,
+          row_number: r.rowNumber,
+          field_name: r.fieldName,
+          raw_value: r.rawValue,
+          error_code: r.errorCode,
+          error_reason: r.errorReason,
+          occurred_at: r.createdAt?.toISOString() ?? "",
+        }));
+      }
+    }
+  }
+
+  // 如果没有任何过滤条件，返回空（避免全表扫描）
+  if (!hasFilter) {
+    return { rows: [], total: 0 };
+  }
+
+  // 合并结果并按时间排序
+  const allRows = [...traceResults, ...errorResults].sort(
+    (a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime()
+  );
+
+  return { rows: allRows.slice(0, params.pageSize), total: allRows.length };
+}
+
 // ====== 监控聚合 ======
 export async function getMonitorSummary(): Promise<MonitorSummary> {
   // 1. 最近5分钟吞吐：按 completed_at 分钟分桶聚合 success_rows（从 import_tasks）
@@ -282,8 +491,10 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
     .where(eq(importTaskBatches.status, "PENDING"));
   const pendingBatches = Number(backlogRows[0]?.pending_batches ?? 0);
   const pendingRows = Number(backlogRows[0]?.pending_rows ?? 0);
-  const backlogStatus: "ok" | "warning" | "critical" =
-    pendingBatches === 0 ? "ok" : pendingRows > 5000 ? "warning" : "ok";
+  // 队列积压预警：>5000 行橙色预警；查询本身失败或积压超过 20000 行红色告警
+  let backlogStatus: "ok" | "warning" | "critical" = "ok";
+  if (pendingRows > 20000) backlogStatus = "critical";
+  else if (pendingRows > 5000) backlogStatus = "warning";
 
   // 3. 阶段耗时分布（基于 batch_performance_log 最近1小时）
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -381,7 +592,7 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
     error_distribution: errorDistRows.map((r) => ({
       error_code: r.error_code,
       count: Number(r.count),
-      reason: "",
+      reason: ERROR_CODE_LABELS[r.error_code] || r.error_code,
     })),
     slow_batches_top10: slowBatchesTop10,
     failed_tasks_recent: failedTasksRecent,
