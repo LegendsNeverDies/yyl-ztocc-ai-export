@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
     const parsedFile = await readFile(file);
 
     // 预扫描总行数（parsedFile.rows 即总行数，包含表头等非数据行；Worker 会按规则过滤）
-    const batchSize = batchSizeStr ? Math.max(100, parseInt(batchSizeStr, 10)) : 1000;
+    const batchSize = batchSizeStr ? Math.max(250, Math.min(2000, parseInt(batchSizeStr, 10))) : 1000;
 
     // 创建任务（同事务写入任务+批次+Outbox+trace）
     const created = await createImportTask({
@@ -107,6 +107,14 @@ export async function POST(req: NextRequest) {
       parsedFile,
       batchSize,
     });
+
+    // 触发一次后台消费：上传成功后立即尝试拉起 Worker，避免完全依赖外部 Cron
+    const workerUrl = new URL("/api/worker/run", req.url);
+    const workerHeaders: Record<string, string> = {};
+    if (process.env.WORKER_API_KEY) {
+      workerHeaders["x-worker-key"] = process.env.WORKER_API_KEY;
+    }
+    void fetch(workerUrl, { method: "POST", headers: workerHeaders }).catch(() => {});
 
     const elapsed = Date.now() - startTime;
     console.log(`[import-tasks] 任务创建完成 task_id=${created.taskId} trace_id=${created.traceId} rows=${created.totalRows} batches=${created.totalBatches} 耗时=${elapsed}ms`);

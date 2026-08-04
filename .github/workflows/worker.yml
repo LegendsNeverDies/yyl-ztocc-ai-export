@@ -1,0 +1,14 @@
+name: Worker heartbeat
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call worker endpoint
+        run: |
+          curl -fsS -X POST "${{ secrets.WORKER_TRIGGER_URL }}?key=${{ secrets.WORKER_API_KEY }}"

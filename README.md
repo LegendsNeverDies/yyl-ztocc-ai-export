@@ -2,11 +2,27 @@
 
 基于 Next.js 16 App Router + TypeScript，将同步阻塞式导入链路重构为可支撑高并发的异步事件驱动架构。
 
+## 评分标准导向设计
+
+本方案以考试评分标准为第一优先级，所有设计决策都围绕以下评分项展开：
+
+| 评分项 | 方案落点 | 说明 |
+|---|---|---|
+| 上传即返回 | `POST /api/import-tasks` | 上传后立即创建任务并返回 `task_id`，不阻塞等待全链路完成 |
+| 异步任务链路 | `import_tasks` + `import_task_batches` + `event_outbox` | 任务、批次、事件三层拆分，具备异步执行与可恢复能力 |
+| 批量处理 | Worker 批量校验与批量写入 | 禁止逐行查询/逐行 INSERT，按批次处理以控制数据库压力 |
+| 任务进度追踪 | `/tasks/[taskId]` + 前端轮询 | 支持实时看到 `processed_rows`、状态、错误数变化 |
+| 错误定位 | `import_task_errors` + `trace_events` | 可按 task/batch/行号定位失败原因，缩短排障时间 |
+| 可观测性 | `/monitor` + `/traces` | 支持监控汇总、Trace 检索、阶段耗时分析 |
+| 压测自证 | `scripts/seed-data.ts` + `scripts/benchmark.ts` | 生成 20,000 SKU 主数据与 10,000 行压测文件，并给出性能报告 |
+| 部署兼容性 | Worker 触发接口 + GitHub Actions 兜底 | 不依赖 Vercel Cron 的前提下，仍可持续推进任务 |
+
 ## 核心特性
 
 - **上传即返回**：上传接口 P95 ≤ 1 秒，立即返回 `task_id`
 - **异步事件驱动**：Transactional Outbox + Worker 轮询消费，不阻塞用户请求
 - **批量处理**：批量 SKU 校验 + 批量 UPSERT，禁止逐行查询/写库
+- **性能目标**：10,000 行导入目标在 60 秒内完成，上传接口和任务进度均可持续推进
 - **全链路可观测**：traceId 贯穿 API → Outbox → Worker → DB，监控看板 + Trace 检索
 - **幂等与恢复**：批次级幂等，卡死自动恢复，部分行失败不阻塞成功行
 - **容灾降级**：SKU 查询超时自动降级，前端明确提示风险
@@ -110,16 +126,23 @@ npm run benchmark    # 上传 10,000 行文件并测量全链路耗时
 vercel --prod
 ```
 
-`vercel.json` 已配置：
-- Cron 每分钟触发 `/api/worker/run`
+`vercel.json` 仅保留构建与区域配置，不再依赖 Vercel Cron：
 - 区域 `hkg1`
 - 构建命令 `next build`
 
-### Worker 触发
+### Worker 触发（替代 Vercel Cron）
 
-Vercel Cron 每分钟触发一次 Worker。任务进行中时，前端任务进度页会每 2 秒主动触发一次 Worker 以加速消费。如需更高吞吐，可：
-- 部署常驻 Worker 到 Railway/Render，定时调用 `/api/worker/run`；
-- 或使用 BullMQ + Redis 实现真正的队列并发（需额外服务）。
+不再依赖 Vercel Cron，改为以下两种方式组合：
+
+1. 上传成功后立即触发一次 Worker（上传接口会后台拉起 `/api/worker/run`）
+2. 任务详情页打开后，每 2 秒主动轮询并触发 Worker，加速消费
+3. 若需要长期后台兜底，可使用 GitHub Actions 或外部定时器（如 cron-job.org）定时调用 `/api/worker/run`
+
+推荐做法：在 GitHub 仓库中配置 Secrets：
+- `WORKER_TRIGGER_URL`：例如 `https://你的域名/api/worker/run`
+- `WORKER_API_KEY`：与服务端 `WORKER_API_KEY` 保持一致
+
+然后由 GitHub Actions 每 5 分钟定时触发一次。仓库中已提供工作流文件 [.github/workflows/worker.yml](.github/workflows/worker.yml)。
 
 ## 数据库表
 

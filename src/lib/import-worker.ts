@@ -22,9 +22,13 @@ import { ERROR_CODES } from "@/types";
 // SKU 查询超时阈值，超过则触发降级
 const SKU_QUERY_TIMEOUT_MS = 3000;
 // 单 Worker 一次处理的最大批次数（控制单次函数执行时长）
-const MAX_BATCHES_PER_RUN = 5;
+const MAX_BATCHES_PER_RUN = 4;
 // 卡死恢复：processing 超过该时间视为卡死
 const STUCK_BATCH_TIMEOUT_MS = 2 * 60 * 1000;
+// 失败批次重试间隔（秒）
+const RETRY_BACKOFF_SECONDS = 10;
+// 单轮最大执行时间（毫秒），提前终止避免过长调用
+const MAX_RUN_DURATION_MS = 12_000;
 
 interface ProcessBatchResult {
   unitId: string;
@@ -47,20 +51,21 @@ interface ProcessBatchResult {
  */
 export async function runWorker(): Promise<{ processed: number; results: ProcessBatchResult[] }> {
   const results: ProcessBatchResult[] = [];
+  const startedAt = Date.now();
 
   // 1. 恢复卡死的批次（processing 超时 → 重置为 PENDING，retryCount+1）
   await recoverStuckBatches();
 
-  // 2. 抢占待处理批次：用原子 UPDATE ... WHERE status='PENDING' RETURNING
+  // 2. 抢占待处理批次：只处理可控数量，避免单次调用太重
   const claimed = await db
     .update(importTaskBatches)
     .set({ status: "PROCESSING", lockedAt: new Date() })
     .where(
       and(
         eq(importTaskBatches.status, "PENDING"),
-        // 限制单次拉取数量
         drizzleSql`${importTaskBatches.id} IN (
-          SELECT id FROM ${importTaskBatches} WHERE status = 'PENDING'
+          SELECT id FROM ${importTaskBatches}
+          WHERE status = 'PENDING' AND (retry_count = 0 OR ${importTaskBatches.completedAt} IS NOT NULL OR ${importTaskBatches.createdAt} < ${new Date(Date.now() - RETRY_BACKOFF_SECONDS * 1000)})
           ORDER BY batch_index ASC LIMIT ${MAX_BATCHES_PER_RUN} FOR UPDATE SKIP LOCKED
         )`
       )
@@ -80,8 +85,11 @@ export async function runWorker(): Promise<{ processed: number; results: Process
       .where(and(eq(importTasks.id, taskId), eq(importTasks.status, "PENDING")));
   }
 
-  // 3. 逐个处理批次
+  // 3. 逐个处理批次；超时前尽量处理完当前轮次，避免单次执行过久
   for (const batch of claimed) {
+    if (Date.now() - startedAt > MAX_RUN_DURATION_MS) {
+      break;
+    }
     const traceIdRow = await db
       .select({ traceId: importTasks.traceId })
       .from(importTasks)
@@ -216,17 +224,30 @@ async function processSingleBatch(
 
   // 更新批次状态：原子更新 processedRows/successRows/failedRows
   // 注意：幂等——重复消费时本批次已是 COMPLETED，前面已 return
+  const nextStatus = status === "COMPLETED" ? "COMPLETED" : "FAILED";
+  const retryAt = status === "FAILED" ? new Date(Date.now() + RETRY_BACKOFF_SECONDS * 1000) : null;
   await db
     .update(importTaskBatches)
     .set({
-      status,
+      status: nextStatus,
       processedRows: batchRows.length,
       successRows: successCount,
       failedRows: failedCount,
-      completedAt: new Date(),
+      completedAt: nextStatus === "COMPLETED" ? new Date() : null,
       errorMessage: insertErrorMsg,
+      lockedAt: null,
+      ...(status === "FAILED"
+        ? { retryCount: drizzleSql`${importTaskBatches.retryCount} + 1` }
+        : {}),
     })
     .where(and(eq(importTaskBatches.taskId, taskId), eq(importTaskBatches.unitId, unitId)));
+
+  if (status === "FAILED") {
+    await db
+      .update(importTaskBatches)
+      .set({ lockedAt: retryAt })
+      .where(and(eq(importTaskBatches.taskId, taskId), eq(importTaskBatches.unitId, unitId)));
+  }
 
   return {
     unitId, batchIndex, status, rowCount: batchRows.length, successCount, failedCount,

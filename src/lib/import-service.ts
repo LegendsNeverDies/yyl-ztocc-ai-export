@@ -40,7 +40,8 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
   const traceId = `trace_${generateId().replace(/-/g, "").slice(0, 24)}`;
   const batchSize = params.batchSize ?? 1000;
   const totalRows = params.parsedFile.rows.length;
-  const totalBatches = Math.max(1, Math.ceil(totalRows / batchSize));
+  const normalizedBatchSize = Math.max(250, Math.min(2000, batchSize));
+  const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
   const fileData = serializeParsedFile(params.parsedFile);
 
@@ -57,7 +58,7 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
       status: "PENDING",
       totalRows,
       totalBatches,
-      batchSize,
+      batchSize: normalizedBatchSize,
     });
 
     // 2. 批次记录 + Outbox 事件 + trace 事件
