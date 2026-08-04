@@ -470,6 +470,22 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
 
 // ====== 监控聚合 ======
 export async function getMonitorSummary(): Promise<MonitorSummary> {
+  const emptySummary: MonitorSummary = {
+    throughput: [],
+    queue_backlog: {
+      pending_batches: 0,
+      pending_rows: 0,
+      status: "ok",
+    },
+    stage_duration: [],
+    error_distribution: [],
+    slow_batches_top10: [],
+    failed_tasks_recent: [],
+    debug_message: "监控汇总查询失败",
+    debug_details: ["数据库连接异常", "相关表不存在或字段不匹配", "SQL 聚合表达式报错"],
+  };
+
+  try {
   // 1. 最近5分钟吞吐：按 completed_at 分钟分桶聚合 success_rows（从 import_tasks）
   const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
   const throughputRows = await db
@@ -579,25 +595,38 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
     created_at: r.created_at?.toISOString() ?? "",
   }));
 
-  return {
-    throughput: throughputRows.map((r) => ({
-      minute: r.minute,
-      success_rows: Number(r.success_rows ?? 0),
-    })),
-    queue_backlog: {
-      pending_batches: pendingBatches,
-      pending_rows: pendingRows,
-      status: backlogStatus,
-    },
-    stage_duration: stageDuration,
-    error_distribution: errorDistRows.map((r) => ({
-      error_code: r.error_code,
-      count: Number(r.count),
-      reason: ERROR_CODE_LABELS[r.error_code] || r.error_code,
-    })),
-    slow_batches_top10: slowBatchesTop10,
-    failed_tasks_recent: failedTasksRecent,
-  };
+    return {
+      throughput: throughputRows.map((r) => ({
+        minute: r.minute,
+        success_rows: Number(r.success_rows ?? 0),
+      })),
+      queue_backlog: {
+        pending_batches: pendingBatches,
+        pending_rows: pendingRows,
+        status: backlogStatus,
+      },
+      stage_duration: stageDuration,
+      error_distribution: errorDistRows.map((r) => ({
+        error_code: r.error_code,
+        count: Number(r.count),
+        reason: ERROR_CODE_LABELS[r.error_code] || r.error_code,
+      })),
+      slow_batches_top10: slowBatchesTop10,
+      failed_tasks_recent: failedTasksRecent,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "未知错误";
+    console.error("getMonitorSummary failed", error);
+    return {
+      ...emptySummary,
+      debug_message: message,
+      debug_details: [
+        "监控汇总查询失败",
+        message,
+        "请检查数据库连接、相关表是否存在以及 SQL 是否兼容当前环境",
+      ],
+    };
+  }
 }
 
 // ====== 内部：读取任务原始文件并重建 ParsedFile ======

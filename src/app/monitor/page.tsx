@@ -46,6 +46,22 @@ export default function MonitorPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8 space-y-6">
+      {summary.debug_message && (
+        <div className="rounded-lg border border-[#f3c3a1] bg-[#fff7e8] p-4 text-sm text-[#8a4b00]">
+          <div className="flex items-center gap-2 font-semibold">
+            <AlertTriangle className="h-4 w-4" /> 调试信息
+          </div>
+          <div className="mt-2">{summary.debug_message}</div>
+          {summary.debug_details?.length ? (
+            <ul className="mt-2 list-disc pl-5">
+              {summary.debug_details.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-[#1d2129] flex items-center gap-2">
           <Activity className="h-6 w-6 text-[#0fc6c2]" /> 导入监控看板

@@ -282,6 +282,8 @@ export interface MonitorSummary {
   error_distribution: { error_code: string; count: number; reason: string }[];
   slow_batches_top10: BatchPerformanceRow[];
   failed_tasks_recent: { id: string; file_name: string; failed_rows: number; created_at: string }[];
+  debug_message?: string;
+  debug_details?: string[];
 }
 
 // 错误码枚举
