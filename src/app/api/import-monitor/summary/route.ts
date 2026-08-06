@@ -19,6 +19,8 @@ export async function GET() {
       queue_backlog: {
         pending_batches: 0,
         pending_rows: 0,
+        processing_batches: 0,
+        processing_rows: 0,
         status: "ok",
       },
       stage_duration: [],
