@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFile } from "@/lib/file-reader";
 import { attachParsedFileToTask } from "@/lib/import-service";
 
-export async function POST(req: NextRequest, { params }: { params: { taskId: string } }) {
+export async function POST(req: NextRequest, ctx: any) {
   try {
-    const taskId = params.taskId;
+    const params = ctx?.params ?? {};
+    const taskId = params.taskId as string | undefined;
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
     if (!file) {
