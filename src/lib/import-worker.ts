@@ -397,10 +397,10 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
   if (shipmentRows.length > 0) {
     await query(
       `INSERT INTO shipments (id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
-       SELECT id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count::int, total_quantity::numeric, batch_id
+       SELECT id::uuid, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count::int, total_quantity::numeric, batch_id::uuid
        FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
          AS t(id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
-       ON CONFLICT (external_code) DO NOTHING
+       ON CONFLICT (external_code) WHERE external_code IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         shipmentRows.map((s) => s.id),
