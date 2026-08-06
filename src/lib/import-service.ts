@@ -167,7 +167,12 @@ export async function createImportTaskFromMeta(params: CreateTaskFromMetaParams)
   const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
   // placeholder fileData，上传后会由 attachParsedFileToTask 替换
-  const fileData = serializeParsedFile({ fileType: params.fileType, sheets: [], rows: [] as any[] });
+  const fileData = serializeParsedFile({
+    fileName: params.fileName,
+    fileType: params.fileType,
+    sheets: [],
+    rows: [] as any[],
+  });
 
   const executeTaskCreation = async (executor: Pick<typeof db, "insert"> | typeof db) => {
     await executor.insert(importTasks).values({
