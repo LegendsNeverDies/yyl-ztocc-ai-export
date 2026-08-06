@@ -329,6 +329,10 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
   const traceResults: TraceSearchResultItem[] = [];
   let errorResults: TraceSearchResultItem[] = [];
 
+  // 真实分页：先取两张表全部匹配项（带安全上限），合并排序后再做 offset/limit。
+  // 上限避免内存爆炸，正常使用场景远小于该值。
+  const FETCH_LIMIT = 1000;
+
   // 1. 查询 trace_events（按 trace_id / task_id）
   if (conditions.length > 0) {
     const where = and(...conditions);
@@ -337,8 +341,7 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
       .from(traceEvents)
       .where(where)
       .orderBy(desc(traceEvents.occurredAt))
-      .limit(params.pageSize)
-      .offset((params.page - 1) * params.pageSize);
+      .limit(FETCH_LIMIT);
 
     traceResults.push(...traceRows.map((r) => ({
       type: "trace_event" as const,
@@ -379,20 +382,12 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
 
   if (errorConditions.length > 0) {
     const errorWhere = and(...errorConditions);
-    const [errCountResult] = await db
-      .select({ count: drizzleSql<number>`count(*)` })
-      .from(importTaskErrors)
-      .where(errorWhere)
-      .execute();
-    const errTotal = Number(errCountResult?.count || 0);
-
     const errRows = await db
       .select()
       .from(importTaskErrors)
       .where(errorWhere)
       .orderBy(importTaskErrors.rowNumber)
-      .limit(params.pageSize)
-      .offset((params.page - 1) * params.pageSize);
+      .limit(FETCH_LIMIT);
 
     errorResults = errRows.map((r) => ({
       type: "error" as const,
@@ -407,11 +402,6 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
       error_reason: r.errorReason,
       occurred_at: r.createdAt?.toISOString() ?? "",
     }));
-
-    // 如果只查错误明细，返回错误总数
-    if (traceResults.length === 0) {
-      return { rows: errorResults, total: errTotal };
-    }
   }
 
   // 3. file_name 搜索：先从 import_tasks 找到匹配的 task_id，再查 trace_events
@@ -433,8 +423,7 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
         .from(traceEvents)
         .where(inArray(traceEvents.traceId, traceIds))
         .orderBy(desc(traceEvents.occurredAt))
-        .limit(params.pageSize)
-        .offset((params.page - 1) * params.pageSize);
+        .limit(FETCH_LIMIT);
       traceResults.push(...traceRows.map((r) => ({
         type: "trace_event" as const,
         trace_id: r.traceId,
@@ -454,8 +443,7 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
           .from(importTaskErrors)
           .where(inArray(importTaskErrors.taskId, taskIds))
           .orderBy(importTaskErrors.rowNumber)
-          .limit(params.pageSize)
-          .offset((params.page - 1) * params.pageSize);
+          .limit(FETCH_LIMIT);
         errorResults = errRows.map((r) => ({
           type: "error" as const,
           trace_id: r.traceId,
@@ -478,12 +466,17 @@ export async function searchTraces(params: TraceSearchParams): Promise<{
     return { rows: [], total: 0 };
   }
 
-  // 合并结果并按时间排序
+  // 合并结果并按时间倒序排序
   const allRows = [...traceResults, ...errorResults].sort(
     (a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime()
   );
 
-  return { rows: allRows.slice(0, params.pageSize), total: allRows.length };
+  // 真实分页：基于合并后的总数做 offset/limit
+  const total = allRows.length;
+  const offset = (params.page - 1) * params.pageSize;
+  const pageRows = allRows.slice(offset, offset + params.pageSize);
+
+  return { rows: pageRows, total };
 }
 
 // ====== 监控聚合 ======

@@ -90,7 +90,7 @@ export default function TracesPage() {
       if (form.row_end) params.set("row_end", form.row_end.trim());
       if (form.error_code) params.set("error_code", form.error_code);
       params.set("page", String(pageNum));
-      params.set("page_size", "50");
+      params.set("page_size", "10");
 
       const res = await fetch(`/api/traces/search?${params}`);
       if (!res.ok) {
@@ -104,7 +104,8 @@ export default function TracesPage() {
       const data = await res.json();
       setResults(data.rows || []);
       setTotal(data.total || 0);
-      setHasMore((data.rows?.length || 0) === 50 && pageNum * 50 < (data.total || 0));
+      // 真实分页：基于 total 判断是否还有下一页（每页 10 条）
+      setHasMore(pageNum * 10 < (data.total || 0));
     } catch {
       setResults([]);
       setTotal(0);
@@ -237,20 +238,9 @@ export default function TracesPage() {
         <div className="card">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-base font-semibold text-[#1d2129]">
-              搜索结果 <span className="text-xs font-normal text-[#86909c]">（共 {total} 条，第 {page} 页）</span>
+              搜索结果 <span className="text-xs font-normal text-[#86909c]">（共 {total} 条，第 {page}/{Math.max(1, Math.ceil(total / 10))} 页）</span>
             </h2>
-            <div className="flex gap-1">
-              <button
-                className="btn-ghost text-xs disabled:opacity-50"
-                disabled={page <= 1}
-                onClick={() => handleSearch(page - 1)}
-              >上一页</button>
-              <button
-                className="btn-ghost text-xs disabled:opacity-50"
-                disabled={!hasMore}
-                onClick={() => handleSearch(page + 1)}
-              >下一页</button>
-            </div>
+            <Pagination page={page} total={total} pageSize={10} onChange={handleSearch} />
           </div>
           <ol className="relative">
             {results.map((item, i) => {
@@ -326,15 +316,66 @@ export default function TracesPage() {
               );
             })}
           </ol>
-          {hasMore && (
-            <div className="mt-4 text-center">
-              <button onClick={() => handleSearch(page + 1)} className="btn-outline text-sm">
-                加载更多
-              </button>
-            </div>
-          )}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ====== 分页器 ======
+function Pagination({
+  page,
+  total,
+  pageSize,
+  onChange,
+}: {
+  page: number;
+  total: number;
+  pageSize: number;
+  onChange: (p: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (totalPages <= 1) return null;
+
+  // 生成页码按钮（最多展示 7 个，含首末页与当前页附近）
+  const pages: (number | "...")[] = [];
+  const add = (n: number | "...") => {
+    if (pages[pages.length - 1] !== n) pages.push(n);
+  };
+  add(1);
+  const start = Math.max(2, page - 2);
+  const end = Math.min(totalPages - 1, page + 2);
+  if (start > 2) add("...");
+  for (let i = start; i <= end; i++) add(i);
+  if (end < totalPages - 1) add("...");
+  if (totalPages > 1) add(totalPages);
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        className="btn-ghost text-xs disabled:opacity-50"
+        disabled={page <= 1}
+        onClick={() => onChange(page - 1)}
+      >上一页</button>
+      {pages.map((p, i) =>
+        p === "..." ? (
+          <span key={`e${i}`} className="px-2 text-xs text-[#86909c]">…</span>
+        ) : (
+          <button
+            key={p}
+            className={cn(
+              "min-w-[28px] rounded px-2 py-1 text-xs",
+              p === page ? "bg-[#0fc6c2] text-white" : "text-[#4e5969] hover:bg-[#f2f3f5]"
+            )}
+            onClick={() => onChange(p)}
+          >{p}</button>
+        )
+      )}
+      <button
+        className="btn-ghost text-xs disabled:opacity-50"
+        disabled={page >= totalPages}
+        onClick={() => onChange(page + 1)}
+      >下一页</button>
     </div>
   );
 }
