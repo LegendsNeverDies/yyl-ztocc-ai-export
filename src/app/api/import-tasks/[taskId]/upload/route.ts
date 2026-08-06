@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFile } from "@/lib/file-reader";
 import { attachParsedFileToTask } from "@/lib/import-service";
+import { getRule } from "@/lib/server-actions";
+import { db } from "@/lib/db";
+import { importTasks } from "@/lib/db-schema";
+import { eq } from "drizzle-orm";
 
 export async function POST(req: NextRequest, ctx: any) {
   try {
@@ -16,10 +20,21 @@ export async function POST(req: NextRequest, ctx: any) {
       return NextResponse.json({ error: "缺少 file 字段" }, { status: 400 });
     }
 
-    // 解析文件（在 Worker 中也会解析，但在上传端需要获得 parsedFile 以便重建批次/Outbox）
+    // 读取文件为 ParsedFile
     const parsedFile = await readFile(file);
 
-    await attachParsedFileToTask(taskId, parsedFile);
+    // 查任务关联的 ruleId 并加载规则（解析前置需要 rule）
+    const taskRows = await db.select({ ruleId: importTasks.ruleId }).from(importTasks).where(eq(importTasks.id, taskId)).limit(1);
+    if (taskRows.length === 0) {
+      return NextResponse.json({ error: `任务 ${taskId} 不存在` }, { status: 404 });
+    }
+    const rule = await getRule(taskRows[0].ruleId);
+    if (!rule) {
+      return NextResponse.json({ error: `规则 ${taskRows[0].ruleId} 不存在` }, { status: 404 });
+    }
+
+    // 附加文件：解析前置 + 真事务重建批次/outbox/解析切片
+    await attachParsedFileToTask(taskId, parsedFile, rule);
 
     // 尝试触发一次后台消费
     const workerUrl = new URL(`/api/worker/run`, req.url);

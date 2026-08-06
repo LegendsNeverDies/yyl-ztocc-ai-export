@@ -5,7 +5,18 @@ import { readFile } from "@/lib/file-reader";
 import { db } from "@/lib/db";
 import { importTasks } from "@/lib/db-schema";
 import { desc, sql as drizzleSql } from "drizzle-orm";
-import type { ImportTaskProgress } from "@/types";
+import type { ImportTaskProgress, ParseRule } from "@/types";
+
+// 规则进程内缓存（压测规则固定，热调用省 1 次 DB RTT）
+const ruleCache = new Map<string, ParseRule>();
+
+async function getRuleCached(ruleId: string): Promise<ParseRule | null> {
+  const cached = ruleCache.get(ruleId);
+  if (cached) return cached;
+  const rule = await getRule(ruleId);
+  if (rule) ruleCache.set(ruleId, rule);
+  return rule;
+}
 
 // GET /api/import-tasks — 任务列表（分页）
 export async function GET(req: NextRequest) {
@@ -89,7 +100,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 校验规则存在
-    const rule = await getRule(ruleId);
+    const rule = await getRuleCached(ruleId);
     if (!rule) {
       return NextResponse.json({ error: `规则 ${ruleId} 不存在` }, { status: 404 });
     }
@@ -125,11 +136,13 @@ export async function POST(req: NextRequest) {
     // 预扫描总行数（parsedFile.rows 即总行数，包含表头等非数据行；Worker 会按规则过滤）
     const batchSize = batchSizeStr ? Math.max(250, Math.min(2000, parseInt(batchSizeStr, 10))) : 1000;
 
-    // 创建任务（同事务写入任务+批次+Outbox+trace）
+    // 创建任务（同事务写入任务+批次+Outbox+解析切片+trace）
+    // 解析前置：上传时就 parseFile 一次，结果按批存 import_task_rows，worker 只读切片
     const created = await createImportTask({
       fileName: file.name,
       fileType: parsedFile.fileType,
       ruleId,
+      rule,
       parsedFile,
       batchSize,
     });

@@ -30,6 +30,7 @@ export const shipments = pgTable("shipments", {
 ]);
 
 // SKU 明细子表：关联到 shipments
+// uniq_shipment_sku 唯一索引用于 UNNEST + ON CONFLICT 幂等写入（同一出库单内同一 SKU 不重复）
 export const orders = pgTable("orders", {
   id: uuid("id").defaultRandom().primaryKey(),
   shipmentId: uuid("shipment_id").notNull().references(() => shipments.id, { onDelete: "cascade" }),
@@ -41,6 +42,7 @@ export const orders = pgTable("orders", {
 }, (t) => [
   index("orders_shipment_id_idx").on(t.shipmentId),
   index("orders_sku_code_idx").on(t.skuCode),
+  uniqueIndex("uniq_shipment_sku").on(t.shipmentId, t.skuCode),
 ]);
 
 // ====== 新增：异步导入链路相关表 ======
@@ -179,4 +181,18 @@ export const traceEvents = pgTable("trace_events", {
 }, (t) => [
   index("trace_events_trace_occurred_idx").on(t.traceId, t.occurredAt),
   index("trace_events_task_idx").on(t.taskId),
+]);
+
+// 解析结果分批存储（上传时解析一次，worker 只读切片，避免重复解析原文件）
+// 每批的 OrderRow[] 以 JSONB 存储，worker 按 (task_id, batch_index) 读取对应批次
+export const importTaskRows = pgTable("import_task_rows", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  taskId: uuid("task_id").notNull().references(() => importTasks.id, { onDelete: "cascade" }),
+  batchIndex: integer("batch_index").notNull(),
+  startRow: integer("start_row").notNull(),
+  endRow: integer("end_row").notNull(),
+  rows: jsonb("rows").notNull(), // OrderRow[] 的 JSONB
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [
+  uniqueIndex("import_task_rows_task_batch_uniq").on(t.taskId, t.batchIndex),
 ]);

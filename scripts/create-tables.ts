@@ -151,6 +151,17 @@ const DDL: string[] = [
     message text,
     occurred_at timestamp DEFAULT now()
   )`,
+
+  // 解析结果分批存储（上传时解析一次，worker 只读切片）
+  `CREATE TABLE IF NOT EXISTS import_task_rows (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL REFERENCES import_tasks(id) ON DELETE CASCADE,
+    batch_index integer NOT NULL,
+    start_row integer NOT NULL,
+    end_row integer NOT NULL,
+    rows jsonb NOT NULL,
+    created_at timestamp DEFAULT now()
+  )`,
 ];
 
 // 索引（CREATE INDEX IF NOT EXISTS，幂等）
@@ -159,6 +170,8 @@ const INDEXES: string[] = [
   `CREATE INDEX IF NOT EXISTS shipments_batch_id_idx ON shipments(batch_id)`,
   `CREATE INDEX IF NOT EXISTS orders_shipment_id_idx ON orders(shipment_id)`,
   `CREATE INDEX IF NOT EXISTS orders_sku_code_idx ON orders(sku_code)`,
+  // 幂等唯一索引：同一出库单内同一 SKU 不重复（UNNEST + ON CONFLICT 用）
+  `CREATE UNIQUE INDEX IF NOT EXISTS uniq_shipment_sku ON orders(shipment_id, sku_code)`,
 
   `CREATE UNIQUE INDEX IF NOT EXISTS sku_master_sku_code_uniq ON sku_master(sku_code)`,
 
@@ -180,6 +193,9 @@ const INDEXES: string[] = [
 
   `CREATE INDEX IF NOT EXISTS trace_events_trace_occurred_idx ON trace_events(trace_id, occurred_at)`,
   `CREATE INDEX IF NOT EXISTS trace_events_task_idx ON trace_events(task_id)`,
+
+  // import_task_rows 索引
+  `CREATE UNIQUE INDEX IF NOT EXISTS import_task_rows_task_batch_uniq ON import_task_rows(task_id, batch_index)`,
 ];
 
 async function main() {

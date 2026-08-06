@@ -1,67 +1,101 @@
 import "server-only";
-import { db } from "@/lib/db";
+import { db, query, withTransaction } from "@/lib/db";
 import { eventOutbox } from "@/lib/db-schema";
 import { eq, and, lte, sql as drizzleSql } from "drizzle-orm";
 import { recordTrace } from "@/lib/import-worker";
-
-const MAX_DISPATCH_PER_RUN = 50;
-const MAX_RETRY = 5;
+import { CONFIG } from "@/lib/config";
 
 /**
- * Outbox Dispatcher：轮询 event_outbox 中 PENDING 事件并"投递"
+ * Outbox Dispatcher：轮询 event_outbox 中 PENDING 事件并真正投递到 Worker
  *
- * 在本架构中，Worker 通过轮询 import_task_batches 表直接拉取 PENDING 批次，
- * Outbox 事件主要作为"可靠事件记录"——保证任务创建与事件写入同事务。
- * Dispatcher 的职责是：把 PENDING 事件标记为 SENT（已投递给 Worker 消费链路），
- * 并记录 trace。这样即使服务在"任务已创建但消息未投递"时宕机，
- * 恢复后 Dispatcher 会继续把 PENDING 事件标记为 SENT，Worker 仍会消费对应批次。
+ * 改造点（借鉴 oms-v4）：
+ * - 事务内 FOR UPDATE SKIP LOCKED 锁定 pending 事件（防并发重复投递）
+ * - 真正 POST 到 Worker（本地 /api/worker/run 或独立 worker 进程）
+ * - 投递成功标记 SENT，失败 retry_count++ + 退避
  *
- * 幂等性：Worker 以 (task_id, unit_id) 为去重键，重复消费不会重复入库。
+ * 幂等性：Worker 以 (task_id, unit_id) 原子 CAS 去重，重复投递不会重复入库。
  */
 export async function runDispatcher(): Promise<{ dispatched: number; failed: number }> {
-  const now = new Date();
-  // 拉取待投递事件（PENDING 且 next_retry_at <= now）
-  const pending = await db
-    .select()
-    .from(eventOutbox)
-    .where(and(eq(eventOutbox.status, "PENDING"), lte(eventOutbox.nextRetryAt, now)))
-    .limit(MAX_DISPATCH_PER_RUN);
+  // 事务内 FOR UPDATE SKIP LOCKED 锁定一批 pending，避免多实例重复投递
+  let pendingRows: { id: string; aggregate_id: string; event_type: string; trace_id: string; payload: any; retry_count: number }[] = [];
+  try {
+    const res = await withTransaction(async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT id, aggregate_id, event_type, trace_id, payload, retry_count
+         FROM event_outbox
+         WHERE status = 'PENDING' AND next_retry_at <= NOW()
+         ORDER BY created_at ASC
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [CONFIG.DISPATCH_BATCH_LIMIT]
+      );
+      return rows;
+    });
+    pendingRows = res as typeof pendingRows;
+  } catch (e) {
+    console.error("[dispatcher] 查询 pending 事件失败:", e);
+    return { dispatched: 0, failed: 0 };
+  }
 
   let dispatched = 0;
   let failed = 0;
 
-  for (const evt of pending) {
+  for (const evt of pendingRows) {
     try {
-      // 投递：标记为 SENT
-      // 在更完整的实现中，这里会 queue.add(evt.payload) 到 Redis/BullMQ
-      // 本架构中 Worker 直接轮询 import_task_batches，故只需标记 SENT + 记 trace
+      // 真正投递：POST 到 worker
+      // 优先用独立的 WORKER_PUBLIC_URL（常驻 worker），否则 fallback 到本地 /api/worker/run
+      const workerUrl = process.env.WORKER_PUBLIC_URL
+        ? `${process.env.WORKER_PUBLIC_URL}/jobs/process-batch`
+        : null;
+
+      if (workerUrl) {
+        // 投递到独立 worker 进程
+        const resp = await fetch(workerUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(process.env.WORKER_API_KEY ? { "x-worker-key": process.env.WORKER_API_KEY } : {}) },
+          body: JSON.stringify(evt.payload),
+        });
+        if (!resp.ok) {
+          throw new Error(`worker responded ${resp.status}`);
+        }
+      } else {
+        // 无独立 worker：fire-and-forget 触发本地 /api/worker/run（它内部会 claim 批次）
+        const localWorkerUrl = process.env.WEB_INTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+        void fetch(`${localWorkerUrl}/api/worker/run`, {
+          method: "POST",
+          headers: { ...(process.env.WORKER_API_KEY ? { "x-worker-key": process.env.WORKER_API_KEY } : {}) },
+        }).catch(() => {});
+      }
+
+      // 标记 SENT
       await db
         .update(eventOutbox)
         .set({ status: "SENT", sentAt: new Date() })
         .where(eq(eventOutbox.id, evt.id));
 
       await recordTrace(
-        evt.traceId,
-        evt.aggregateId,
-        ((evt.payload as { payload?: { payload?: { unit_id?: string } } })?.payload?.payload?.unit_id) ?? null,
-        `${evt.eventType}Dispatched`,
+        evt.trace_id,
+        evt.aggregate_id,
+        (evt.payload?.payload?.payload?.unit_id as string) ?? null,
+        `${evt.event_type}Dispatched`,
         "SENT",
-        `事件 ${evt.eventType} 已投递至 Worker 队列`
+        `事件 ${evt.event_type} 已投递至 Worker 队列`
       );
       dispatched++;
-    } catch {
-      // 投递失败：retryCount+1，设置退避
-      const nextRetry = newRetryAt(evt.retryCount + 1);
-      const newStatus = evt.retryCount + 1 >= MAX_RETRY ? "FAILED" : "PENDING";
+    } catch (e) {
+      // 投递失败：retry_count++ + 退避
+      const nextRetry = newRetryAt(evt.retry_count + 1);
+      const newStatus = evt.retry_count + 1 >= CONFIG.OUTBOX_MAX_RETRY ? "FAILED" : "PENDING";
       await db
         .update(eventOutbox)
         .set({
           status: newStatus,
-          retryCount: evt.retryCount + 1,
+          retryCount: evt.retry_count + 1,
           nextRetryAt: nextRetry,
         })
         .where(eq(eventOutbox.id, evt.id));
       failed++;
+      console.error(`[dispatcher] 投递事件 ${evt.id} 失败:`, e instanceof Error ? e.message : e);
     }
   }
 

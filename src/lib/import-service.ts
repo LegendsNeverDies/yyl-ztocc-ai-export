@@ -1,5 +1,5 @@
 import "server-only";
-import { db, sql } from "@/lib/db";
+import { db, withTransaction } from "@/lib/db";
 import {
   importTasks,
   importTaskBatches,
@@ -11,6 +11,8 @@ import {
 import { eq, and, desc, inArray, lte, gte, sql as drizzleSql } from "drizzle-orm";
 import { generateId } from "@/lib/utils";
 import { serializeParsedFile, deserializeParsedFile } from "@/lib/import-serialize";
+import { parseFile } from "@/lib/parse-engine";
+import { CONFIG } from "@/lib/config";
 import type { ParsedFile, ParseRule, ImportTaskProgress, ImportTaskErrorRow, BatchPerformanceRow, TraceEventRow, MonitorSummary } from "@/types";
 import { ERROR_CODE_LABELS } from "@/types";
 
@@ -19,6 +21,7 @@ export interface CreateTaskParams {
   fileName: string;
   fileType: "excel" | "pdf";
   ruleId: string;
+  rule: ParseRule;
   parsedFile: ParsedFile;
   batchSize?: number;
 }
@@ -31,116 +34,148 @@ export interface CreatedTask {
 }
 
 /**
- * 创建导入任务 + 批次 + Outbox 事件（同一事务）
- * Neon HTTP 的 drizzle transaction 是基于批量 HTTP 请求模拟的，
- * 但仍保证所有语句在一个请求中提交，满足"任务与 Outbox 同事务"要求。
+ * 创建导入任务 + 批次 + Outbox 事件 + 解析结果切片（同一真事务）
+ *
+ * 关键优化（借鉴 oms-v4）：
+ * - 上传时就调用 parseFile 解析一次，结果按批切片存入 import_task_rows（JSONB）
+ * - Worker 只读切片，不再重读原文件、不再重新解析
+ * - 使用 neon-serverless Pool 的真事务（BEGIN/COMMIT/ROLLBACK），保证 Outbox 原子性
+ * - 批次/outbox/rows 用多值 INSERT（UNNEST），最小化 DB 往返
  */
 export async function createImportTask(params: CreateTaskParams): Promise<CreatedTask> {
   const taskId = generateId();
   const traceId = `trace_${generateId().replace(/-/g, "").slice(0, 24)}`;
-  const batchSize = params.batchSize ?? 1000;
-  const totalRows = params.parsedFile.rows.length;
+  const batchSize = params.batchSize ?? CONFIG.BATCH_SIZE;
   const normalizedBatchSize = Math.max(250, Math.min(2000, batchSize));
+
+  // 1. 上传时一次性解析（复用 V2 规则引擎），得到全部 OrderRow
+  const allRows = parseFile(params.parsedFile, params.rule);
+  const totalRows = allRows.length;
   const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
-  const fileData = serializeParsedFile(params.parsedFile);
+  // 2. 按批切片，准备每批的 OrderRow JSON
+  const chunkJsons: string[] = [];
+  const chunkStart: number[] = [];
+  const chunkEnd: number[] = [];
+  const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
+  const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
 
-  type TaskExecutor = Pick<typeof db, "insert">;
-  const executeTaskCreation = async (executor: TaskExecutor) => {
-    // 1. 任务主记录
-    await executor.insert(importTasks).values({
-      id: taskId,
-      traceId,
-      fileName: params.fileName,
-      ruleId: params.ruleId,
-      fileData,
-      fileType: params.fileType,
-      status: "PENDING",
-      totalRows,
-      totalBatches,
-      batchSize: normalizedBatchSize,
-    });
+  for (let i = 0; i < totalBatches; i++) {
+    const startRow = i * normalizedBatchSize;
+    const endRow = Math.min(startRow + normalizedBatchSize, totalRows);
+    const unitId = `${taskId.slice(0, 8)}_b${i}`;
+    const batchSlice = allRows.slice(startRow, endRow);
 
-    // 2. 批次记录 + Outbox 事件 + trace 事件
-    const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
-    const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
+    chunkJsons.push(JSON.stringify(batchSlice));
+    chunkStart.push(startRow);
+    chunkEnd.push(endRow);
 
-    for (let i = 0; i < totalBatches; i++) {
-      const startRow = i * batchSize;
-      const endRow = Math.min(startRow + batchSize, totalRows);
-      const unitId = `${taskId.slice(0, 8)}_b${i}`;
-
-      batchRows.push({
-        taskId,
-        unitId,
-        batchIndex: i,
-        startRow,
-        endRow,
-        status: "PENDING",
-      });
-
-      outboxRows.push({
-        id: generateId(),
-        aggregateId: taskId,
-        eventType: "ImportBatchCreated",
-        schemaVersion: 1,
-        traceId,
-        payload: {
-          event_id: generateId(),
-          event_type: "ImportBatchCreated",
-          schema_version: 1,
-          aggregate_id: taskId,
-          trace_id: traceId,
-          occurred_at: new Date().toISOString(),
-          payload: {
-            task_id: taskId,
-            unit_id: unitId,
-            batch_index: i,
-            start_row: startRow,
-            end_row: endRow,
-          },
-        },
-        status: "PENDING",
-        nextRetryAt: new Date(),
-      });
-    }
-
-    // 批量插入批次记录
-    for (let i = 0; i < batchRows.length; i += 500) {
-      await executor.insert(importTaskBatches).values(batchRows.slice(i, i + 500));
-    }
-    // 批量插入 Outbox
-    for (let i = 0; i < outboxRows.length; i += 500) {
-      await executor.insert(eventOutbox).values(outboxRows.slice(i, i + 500));
-    }
-
-    // trace：任务创建事件
-    await executor.insert(traceEvents).values({
-      traceId,
+    batchRows.push({
       taskId,
-      eventName: "ImportTaskCreated",
-      eventStatus: "PENDING",
-      message: `用户上传文件 ${params.fileName}，共 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元`,
+      unitId,
+      batchIndex: i,
+      startRow,
+      endRow,
+      status: "PENDING",
     });
-  };
 
-  // neon-http 可能不支持 transaction，若不支持则降级为顺序执行。
-  if (typeof db.transaction === "function") {
-    try {
-      await db.transaction(async (tx) => {
-        await executeTaskCreation(tx as TaskExecutor);
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("No transactions support in neon-http driver")) {
-        console.warn("[import-service] neon-http 不支持事务，已降级为非事务性导入任务创建");
-        await executeTaskCreation(db);
-      } else {
-        throw error;
-      }
-    }
-  } else {
-    await executeTaskCreation(db);
+    outboxRows.push({
+      id: generateId(),
+      aggregateId: taskId,
+      eventType: "ImportBatchCreated",
+      schemaVersion: 1,
+      traceId,
+      payload: {
+        event_id: generateId(),
+        event_type: "ImportBatchCreated",
+        schema_version: 1,
+        aggregate_id: taskId,
+        trace_id: traceId,
+        occurred_at: new Date().toISOString(),
+        payload: {
+          task_id: taskId,
+          unit_id: unitId,
+          batch_index: i,
+          start_row: startRow,
+          end_row: endRow,
+        },
+      },
+      status: "PENDING",
+      nextRetryAt: new Date(),
+    });
   }
+
+  // 3. 单真事务：task + batches + outbox + parsed_rows + trace + status=processing
+  //    neon-serverless Pool 支持 BEGIN/COMMIT/ROLLBACK，保证 Outbox 模式原子性
+  await withTransaction(async (tx) => {
+    // 任务主记录
+    await tx.query(
+      `INSERT INTO import_tasks (id, trace_id, file_name, rule_id, file_data, file_type, status, total_rows, total_batches, batch_size)
+       VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9)`,
+      [
+        taskId,
+        traceId,
+        params.fileName,
+        params.ruleId,
+        JSON.stringify(serializeParsedFile(params.parsedFile)),
+        params.fileType,
+        totalRows,
+        totalBatches,
+        normalizedBatchSize,
+      ]
+    );
+
+    // 批次记录（多值 INSERT via UNNEST）
+    if (batchRows.length > 0) {
+      const unitIds = batchRows.map((b) => b.unitId);
+      const batchIndexes = batchRows.map((b) => b.batchIndex);
+      const startRows = batchRows.map((b) => b.startRow);
+      const endRows = batchRows.map((b) => b.endRow);
+      await tx.query(
+        `INSERT INTO import_task_batches (task_id, unit_id, batch_index, start_row, end_row, status)
+         SELECT $1, unit_id, batch_index, start_row, end_row, 'PENDING'
+         FROM UNNEST($2::text[], $3::int[], $4::int[], $5::int[])
+           AS t(unit_id, batch_index, start_row, end_row)`,
+        [taskId, unitIds, batchIndexes, startRows, endRows]
+      );
+    }
+
+    // Outbox 事件（多值 INSERT via UNNEST）
+    if (outboxRows.length > 0) {
+      const eventTypes = outboxRows.map(() => "ImportBatchCreated");
+      const eventPayloads = outboxRows.map((o) => JSON.stringify(o.payload));
+      const eventTraceIds = outboxRows.map((o) => o.traceId);
+      await tx.query(
+        `INSERT INTO event_outbox (id, aggregate_id, event_type, schema_version, trace_id, payload, status, next_retry_at)
+         SELECT id, $1, event_type, 1, trace_id, payload, 'PENDING', NOW()
+         FROM UNNEST($2::uuid[], $3::text[], $4::jsonb[], $5::text[])
+           AS t(id, event_type, payload, trace_id)`,
+        [taskId, outboxRows.map((o) => o.id), eventTypes, eventPayloads, eventTraceIds]
+      );
+    }
+
+    // 解析结果切片（多值 INSERT via UNNEST）
+    if (chunkJsons.length > 0) {
+      await tx.query(
+        `INSERT INTO import_task_rows (task_id, batch_index, start_row, end_row, rows)
+         SELECT $1, batch_index, start_row, end_row, rows
+         FROM UNNEST($2::int[], $3::int[], $4::int[], $5::jsonb[])
+           AS t(batch_index, start_row, end_row, rows)`,
+        [taskId, batchRows.map((b) => b.batchIndex), chunkStart, chunkEnd, chunkJsons]
+      );
+    }
+
+    // trace：任务创建事件 + 状态推进到 processing（并入事务省 RTT）
+    await tx.query(
+      `INSERT INTO trace_events (trace_id, task_id, event_name, event_status, message)
+       VALUES ($1, $2, 'ImportTaskCreated', 'PENDING', $3)`,
+      [traceId, taskId, `用户上传文件 ${params.fileName}，解析 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元`]
+    );
+    await tx.query(
+      `UPDATE import_tasks SET status = 'PROCESSING' WHERE id = $1 AND status = 'PENDING'`,
+      [taskId]
+    );
+  });
 
   return { taskId, traceId, totalRows, totalBatches };
 }
@@ -157,219 +192,248 @@ export interface CreateTaskFromMetaParams {
 /**
  * 基于前端预扫描得到的 totalRows 创建任务（不包含 parsedFile），返回 taskId + traceId
  * 同样会创建 import_task_batches + outbox 以便 Dispatcher 投递。
+ * 使用真事务保证原子性。
  */
 export async function createImportTaskFromMeta(params: CreateTaskFromMetaParams): Promise<CreatedTask> {
   const taskId = generateId();
   const traceId = `trace_${generateId().replace(/-/g, "").slice(0, 24)}`;
-  const batchSize = params.batchSize ?? 1000;
+  const batchSize = params.batchSize ?? CONFIG.BATCH_SIZE;
   const normalizedBatchSize = Math.max(250, Math.min(2000, batchSize));
   const totalRows = Math.max(0, Math.floor(params.totalRows));
   const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
-  // placeholder fileData，上传后会由 attachParsedFileToTask 替换
-  const fileData = serializeParsedFile({
-    fileName: params.fileName,
-    fileType: params.fileType,
-    sheets: [],
-    rows: [] as any[],
-  });
+  const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
+  const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
 
-  const executeTaskCreation = async (executor: Pick<typeof db, "insert"> | typeof db) => {
-    await executor.insert(importTasks).values({
-      id: taskId,
-      traceId,
-      fileName: params.fileName,
-      ruleId: params.ruleId,
-      fileData,
-      fileType: params.fileType,
-      status: "PENDING",
-      totalRows,
-      totalBatches,
-      batchSize: normalizedBatchSize,
-    });
+  for (let i = 0; i < totalBatches; i++) {
+    const startRow = i * normalizedBatchSize;
+    const endRow = Math.min(startRow + normalizedBatchSize, totalRows);
+    const unitId = `${taskId.slice(0, 8)}_b${i}`;
 
-    const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
-    const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
-
-    for (let i = 0; i < totalBatches; i++) {
-      const startRow = i * normalizedBatchSize;
-      const endRow = Math.min(startRow + normalizedBatchSize, totalRows);
-      const unitId = `${taskId.slice(0, 8)}_b${i}`;
-
-      batchRows.push({
-        taskId,
-        unitId,
-        batchIndex: i,
-        startRow,
-        endRow,
-        status: "PENDING",
-      });
-
-      outboxRows.push({
-        id: generateId(),
-        aggregateId: taskId,
-        eventType: "ImportBatchCreated",
-        schemaVersion: 1,
-        traceId,
-        payload: {
-          event_id: generateId(),
-          event_type: "ImportBatchCreated",
-          schema_version: 1,
-          aggregate_id: taskId,
-          trace_id: traceId,
-          occurred_at: new Date().toISOString(),
-          payload: {
-            task_id: taskId,
-            unit_id: unitId,
-            batch_index: i,
-            start_row: startRow,
-            end_row: endRow,
-          },
-        },
-        status: "PENDING",
-        nextRetryAt: new Date(),
-      });
-    }
-
-    for (let i = 0; i < batchRows.length; i += 500) {
-      await executor.insert(importTaskBatches).values(batchRows.slice(i, i + 500));
-    }
-    for (let i = 0; i < outboxRows.length; i += 500) {
-      await executor.insert(eventOutbox).values(outboxRows.slice(i, i + 500));
-    }
-
-    await executor.insert(traceEvents).values({
-      traceId,
+    batchRows.push({
       taskId,
-      eventName: "ImportTaskCreated",
-      eventStatus: "PENDING",
-      message: `用户预注册任务 ${params.fileName}，共 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元 (meta)`,
+      unitId,
+      batchIndex: i,
+      startRow,
+      endRow,
+      status: "PENDING",
     });
-  };
 
-  if (typeof db.transaction === "function") {
-    try {
-      await db.transaction(async (tx) => {
-        await executeTaskCreation(tx as any);
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("No transactions support in neon-http driver")) {
-        console.warn("[import-service] neon-http 不支持事务，已降级为非事务性导入任务创建 (meta)");
-        await executeTaskCreation(db);
-      } else {
-        throw error;
-      }
-    }
-  } else {
-    await executeTaskCreation(db);
+    outboxRows.push({
+      id: generateId(),
+      aggregateId: taskId,
+      eventType: "ImportBatchCreated",
+      schemaVersion: 1,
+      traceId,
+      payload: {
+        event_id: generateId(),
+        event_type: "ImportBatchCreated",
+        schema_version: 1,
+        aggregate_id: taskId,
+        trace_id: traceId,
+        occurred_at: new Date().toISOString(),
+        payload: {
+          task_id: taskId,
+          unit_id: unitId,
+          batch_index: i,
+          start_row: startRow,
+          end_row: endRow,
+        },
+      },
+      status: "PENDING",
+      nextRetryAt: new Date(),
+    });
   }
+
+  await withTransaction(async (tx) => {
+    const fileData = JSON.stringify(
+      serializeParsedFile({
+        fileName: params.fileName,
+        fileType: params.fileType,
+        sheets: [],
+        rows: [] as unknown as never[],
+      })
+    );
+
+    await tx.query(
+      `INSERT INTO import_tasks (id, trace_id, file_name, rule_id, file_data, file_type, status, total_rows, total_batches, batch_size)
+       VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9)`,
+      [taskId, traceId, params.fileName, params.ruleId, fileData, params.fileType, totalRows, totalBatches, normalizedBatchSize]
+    );
+
+    if (batchRows.length > 0) {
+      await tx.query(
+        `INSERT INTO import_task_batches (task_id, unit_id, batch_index, start_row, end_row, status)
+         SELECT $1, unit_id, batch_index, start_row, end_row, 'PENDING'
+         FROM UNNEST($2::text[], $3::int[], $4::int[], $5::int[])
+           AS t(unit_id, batch_index, start_row, end_row)`,
+        [
+          taskId,
+          batchRows.map((b) => b.unitId),
+          batchRows.map((b) => b.batchIndex),
+          batchRows.map((b) => b.startRow),
+          batchRows.map((b) => b.endRow),
+        ]
+      );
+    }
+
+    if (outboxRows.length > 0) {
+      await tx.query(
+        `INSERT INTO event_outbox (id, aggregate_id, event_type, schema_version, trace_id, payload, status, next_retry_at)
+         SELECT id, $1, event_type, 1, trace_id, payload, 'PENDING', NOW()
+         FROM UNNEST($2::uuid[], $3::text[], $4::jsonb[], $5::text[])
+           AS t(id, event_type, payload, trace_id)`,
+        [
+          taskId,
+          outboxRows.map((o) => o.id),
+          outboxRows.map(() => "ImportBatchCreated"),
+          outboxRows.map((o) => JSON.stringify(o.payload)),
+          outboxRows.map((o) => o.traceId),
+        ]
+      );
+    }
+
+    await tx.query(
+      `INSERT INTO trace_events (trace_id, task_id, event_name, event_status, message)
+       VALUES ($1, $2, 'ImportTaskCreated', 'PENDING', $3)`,
+      [traceId, taskId, `用户预注册任务 ${params.fileName}，共 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元 (meta)`]
+    );
+  });
 
   return { taskId, traceId, totalRows, totalBatches };
 }
 
 /**
- * 上传后把 parsedFile 附加到已创建的任务上，并在同一事务中重建批次/Outbox（如果 totalRows 发生变化）
+ * 上传后把 parsedFile 附加到已创建的任务上，并在同一真事务中重建批次/Outbox/解析切片。
+ * 附加时会 parseFile 解析一次，按批切片存入 import_task_rows。
  */
-export async function attachParsedFileToTask(taskId: string, parsedFile: ParsedFile): Promise<void> {
-  const rows = parsedFile.rows || [];
-  const totalRows = rows.length;
+export async function attachParsedFileToTask(taskId: string, parsedFile: ParsedFile, rule: ParseRule): Promise<void> {
+  const totalRows = parsedFile.rows.length;
 
   const taskRows = await db.select().from(importTasks).where(eq(importTasks.id, taskId)).limit(1);
   if (taskRows.length === 0) throw new Error(`task ${taskId} not found`);
   const existing = taskRows[0];
-  const batchSize = existing.batchSize ?? 1000;
+  const batchSize = existing.batchSize ?? CONFIG.BATCH_SIZE;
   const normalizedBatchSize = Math.max(250, Math.min(2000, batchSize));
   const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
-  const fileData = serializeParsedFile(parsedFile);
+  // 解析前置：附加文件时也解析一次，切片存 import_task_rows
+  const allRows = parseFile(parsedFile, rule);
+  const chunkJsons: string[] = [];
+  const chunkStart: number[] = [];
+  const chunkEnd: number[] = [];
+  const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
+  const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
 
-  // 重建批次与 outbox 的执行体
-  const executeAttach = async (executor: typeof db) => {
-    // 1. 更新 import_tasks 基础字段与 fileData
-    await executor
-      .update(importTasks)
-      .set({ fileData, totalRows, totalBatches, batchSize: normalizedBatchSize })
-      .where(eq(importTasks.id, taskId));
+  for (let i = 0; i < totalBatches; i++) {
+    const startRow = i * normalizedBatchSize;
+    const endRow = Math.min(startRow + normalizedBatchSize, totalRows);
+    const unitId = `${taskId.slice(0, 8)}_b${i}`;
+    const batchSlice = allRows.slice(startRow, endRow);
 
-    // 2. 删除旧的批次与 outbox
-    await executor.delete(importTaskBatches).where(eq(importTaskBatches.taskId, taskId));
-    await executor.delete(eventOutbox).where(eq(eventOutbox.aggregateId, taskId));
+    chunkJsons.push(JSON.stringify(batchSlice));
+    chunkStart.push(startRow);
+    chunkEnd.push(endRow);
 
-    // 3. 重新创建批次与 outbox
-    const batchRows: (typeof importTaskBatches.$inferInsert)[] = [];
-    const outboxRows: (typeof eventOutbox.$inferInsert)[] = [];
-    for (let i = 0; i < totalBatches; i++) {
-      const startRow = i * normalizedBatchSize;
-      const endRow = Math.min(startRow + normalizedBatchSize, totalRows);
-      const unitId = `${taskId.slice(0, 8)}_b${i}`;
-
-      batchRows.push({
-        taskId,
-        unitId,
-        batchIndex: i,
-        startRow,
-        endRow,
-        status: "PENDING",
-      });
-
-      outboxRows.push({
-        id: generateId(),
-        aggregateId: taskId,
-        eventType: "ImportBatchCreated",
-        schemaVersion: 1,
-        traceId: existing.traceId,
-        payload: {
-          event_id: generateId(),
-          event_type: "ImportBatchCreated",
-          schema_version: 1,
-          aggregate_id: taskId,
-          trace_id: existing.traceId,
-          occurred_at: new Date().toISOString(),
-          payload: {
-            task_id: taskId,
-            unit_id: unitId,
-            batch_index: i,
-            start_row: startRow,
-            end_row: endRow,
-          },
-        },
-        status: "PENDING",
-        nextRetryAt: new Date(),
-      });
-    }
-
-    for (let i = 0; i < batchRows.length; i += 500) {
-      await executor.insert(importTaskBatches).values(batchRows.slice(i, i + 500));
-    }
-    for (let i = 0; i < outboxRows.length; i += 500) {
-      await executor.insert(eventOutbox).values(outboxRows.slice(i, i + 500));
-    }
-
-    await executor.insert(traceEvents).values({
-      traceId: existing.traceId,
+    batchRows.push({
       taskId,
-      eventName: "ImportFileAttached",
-      eventStatus: "PENDING",
-      message: `任务 ${taskId} 附加了文件，totalRows=${totalRows}，重建 ${totalBatches} 个批次`,
+      unitId,
+      batchIndex: i,
+      startRow,
+      endRow,
+      status: "PENDING",
     });
-  };
 
-  if (typeof db.transaction === "function") {
-    try {
-      await db.transaction(async (tx) => {
-        await executeAttach(tx as any);
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("No transactions support in neon-http driver")) {
-        console.warn("[import-service] neon-http 不支持事务，已降级为非事务性 attachParsedFileToTask");
-        await executeAttach(db);
-      } else {
-        throw error;
-      }
-    }
-  } else {
-    await executeAttach(db);
+    outboxRows.push({
+      id: generateId(),
+      aggregateId: taskId,
+      eventType: "ImportBatchCreated",
+      schemaVersion: 1,
+      traceId: existing.traceId,
+      payload: {
+        event_id: generateId(),
+        event_type: "ImportBatchCreated",
+        schema_version: 1,
+        aggregate_id: taskId,
+        trace_id: existing.traceId,
+        occurred_at: new Date().toISOString(),
+        payload: {
+          task_id: taskId,
+          unit_id: unitId,
+          batch_index: i,
+          start_row: startRow,
+          end_row: endRow,
+        },
+      },
+      status: "PENDING",
+      nextRetryAt: new Date(),
+    });
   }
+
+  await withTransaction(async (tx) => {
+    // 更新 import_tasks 基础字段与 fileData
+    await tx.query(
+      `UPDATE import_tasks SET file_data = $2, total_rows = $3, total_batches = $4, batch_size = $5, status = 'PROCESSING'
+       WHERE id = $1`,
+      [taskId, JSON.stringify(serializeParsedFile(parsedFile)), totalRows, totalBatches, normalizedBatchSize]
+    );
+
+    // 删除旧的批次、outbox、解析切片
+    await tx.query(`DELETE FROM import_task_batches WHERE task_id = $1`, [taskId]);
+    await tx.query(`DELETE FROM event_outbox WHERE aggregate_id = $1`, [taskId]);
+    await tx.query(`DELETE FROM import_task_rows WHERE task_id = $1`, [taskId]);
+
+    // 重新创建批次
+    if (batchRows.length > 0) {
+      await tx.query(
+        `INSERT INTO import_task_batches (task_id, unit_id, batch_index, start_row, end_row, status)
+         SELECT $1, unit_id, batch_index, start_row, end_row, 'PENDING'
+         FROM UNNEST($2::text[], $3::int[], $4::int[], $5::int[])
+           AS t(unit_id, batch_index, start_row, end_row)`,
+        [
+          taskId,
+          batchRows.map((b) => b.unitId),
+          batchRows.map((b) => b.batchIndex),
+          batchRows.map((b) => b.startRow),
+          batchRows.map((b) => b.endRow),
+        ]
+      );
+    }
+
+    // 重新创建 outbox
+    if (outboxRows.length > 0) {
+      await tx.query(
+        `INSERT INTO event_outbox (id, aggregate_id, event_type, schema_version, trace_id, payload, status, next_retry_at)
+         SELECT id, $1, event_type, 1, trace_id, payload, 'PENDING', NOW()
+         FROM UNNEST($2::uuid[], $3::text[], $4::jsonb[], $5::text[])
+           AS t(id, event_type, payload, trace_id)`,
+        [
+          taskId,
+          outboxRows.map((o) => o.id),
+          outboxRows.map(() => "ImportBatchCreated"),
+          outboxRows.map((o) => JSON.stringify(o.payload)),
+          outboxRows.map((o) => o.traceId),
+        ]
+      );
+    }
+
+    // 写入解析切片
+    if (chunkJsons.length > 0) {
+      await tx.query(
+        `INSERT INTO import_task_rows (task_id, batch_index, start_row, end_row, rows)
+         SELECT $1, batch_index, start_row, end_row, rows
+         FROM UNNEST($2::int[], $3::int[], $4::int[], $5::jsonb[])
+           AS t(batch_index, start_row, end_row, rows)`,
+        [taskId, batchRows.map((b) => b.batchIndex), chunkStart, chunkEnd, chunkJsons]
+      );
+    }
+
+    await tx.query(
+      `INSERT INTO trace_events (trace_id, task_id, event_name, event_status, message)
+       VALUES ($1, $2, 'ImportFileAttached', 'PROCESSING', $3)`,
+      [existing.traceId, taskId, `任务 ${taskId} 附加了文件，解析 ${totalRows} 行，重建 ${totalBatches} 个批次`]
+    );
+  });
 }
 
 // ====== 任务查询 ======
@@ -379,7 +443,6 @@ export async function getTaskProgress(taskId: string): Promise<ImportTaskProgres
   const t = rows[0];
 
   const processed = t.processedRows;
-  const success = t.successRows;
   let throughput: number | undefined;
   let etaSeconds: number | null | undefined;
 
