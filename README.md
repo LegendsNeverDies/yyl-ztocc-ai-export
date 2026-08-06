@@ -77,12 +77,18 @@ npm run db:seed             # 初始化 6 个内置解析规则
 
 ```bash
 npm run db:seed-data         # 生成 20,000 SKU + 10,000 行 Excel 压测文件
+npm run db:clean-sku         # 清理压测 SKU 主数据（仅清 sku_master 表）
+npm run db:clean-sku -- --all # 清理全部压测数据（运单 + 异步任务链路 + SKU）
 ```
 
 生成物：
 - `sku_master` 表：20,000 条 SKU 主数据（`SKU_00001` ~ `SKU_20000`）
 - `test-data/10000-orders.xlsx`：10,000 行运单（含 1% 非法 SKU）
 - `test-data/bench-rule.json`：配套解析规则
+
+清理说明：
+- `db:clean-sku`（默认）：仅 `TRUNCATE sku_master`，重置自增序列，适合重复灌入主数据
+- `db:clean-sku -- --all`：按外键依赖顺序清理全部压测产生的表（`import_task_errors` / `import_task_batches` / `import_tasks` / `batch_performance_log` / `trace_events` / `event_outbox` / `orders` / `shipments` / `sku_master`），适合压测前彻底重置环境
 
 ### 4. 启动开发服务器
 
@@ -170,6 +176,7 @@ vercel --prod
 npm run db:create-tables    # 建表（幂等）
 npm run db:seed             # 初始化解析规则
 npm run db:seed-data        # 生成压测数据
+npm run db:clean-sku        # 清理压测 SKU 主数据（加 -- --all 清理全部压测数据）
 npm run benchmark           # 压测
 npm run dev                 # 开发服务器
 npm run build               # 生产构建
