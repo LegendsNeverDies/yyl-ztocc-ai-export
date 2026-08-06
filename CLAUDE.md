@@ -21,6 +21,12 @@ npm run db:generate  # drizzle-kit: generate SQL migrations from db-schema.ts
 npm run db:push      # push schema to the Neon Postgres DB
 npm run db:seed      # run scripts/seed.ts → seedDemoRules() (writes 6 built-in rules)
 npm run db:studio    # drizzle-kit studio
+
+npm run db:create-tables  # create all tables incl. async pipeline tables (idempotent DDL)
+npm run db:seed-data      # generate 20,000 SKU master rows + 10,000-row benchmark Excel
+npm run db:clean-sku      # TRUNCATE only sku_master (reset identity)
+npm run db:clean-all      # TRUNCATE all benchmark tables (FK-ordered, reset identity)
+npm run benchmark         # run scripts/benchmark.ts (upload 10k rows, measure end-to-end)
 ```
 
 There is no test runner configured. `scripts/verify-scenarios.ts` is a static checklist (prints expectations for each demo file), not a real test. To verify parsing, run the dev server against the sample files in `demos/`. `scripts/gen-1000.ts` regenerates the root `1000条测试运单.xlsx` (uses `xlsx`, not exceljs).

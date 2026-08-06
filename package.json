@@ -14,6 +14,7 @@
     "db:create-tables": "npx tsx scripts/create-tables.ts",
     "db:seed-data": "npx tsx scripts/seed-data.ts",
     "db:clean-sku": "npx tsx scripts/clean-sku-data.ts",
+    "db:clean-all": "npx tsx scripts/clean-sku-data.ts --all",
     "benchmark": "npx tsx scripts/benchmark.ts"
   },
   "dependencies": {

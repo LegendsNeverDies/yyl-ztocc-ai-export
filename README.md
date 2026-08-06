@@ -78,7 +78,7 @@ npm run db:seed             # 初始化 6 个内置解析规则
 ```bash
 npm run db:seed-data         # 生成 20,000 SKU + 10,000 行 Excel 压测文件
 npm run db:clean-sku         # 清理压测 SKU 主数据（仅清 sku_master 表）
-npm run db:clean-sku -- --all # 清理全部压测数据（运单 + 异步任务链路 + SKU）
+npm run db:clean-all         # 清理全部压测数据（运单 + 异步任务链路 + SKU）
 ```
 
 生成物：
@@ -87,8 +87,10 @@ npm run db:clean-sku -- --all # 清理全部压测数据（运单 + 异步任务
 - `test-data/bench-rule.json`：配套解析规则
 
 清理说明：
-- `db:clean-sku`（默认）：仅 `TRUNCATE sku_master`，重置自增序列，适合重复灌入主数据
-- `db:clean-sku -- --all`：按外键依赖顺序清理全部压测产生的表（`import_task_errors` / `import_task_batches` / `import_tasks` / `batch_performance_log` / `trace_events` / `event_outbox` / `orders` / `shipments` / `sku_master`），适合压测前彻底重置环境
+- `db:clean-sku`：仅 `TRUNCATE sku_master`，重置自增序列，适合重复灌入主数据
+- `db:clean-all`：按外键依赖顺序清理全部压测产生的表（`import_task_errors` / `import_task_batches` / `batch_performance_log` / `trace_events` / `event_outbox` / `import_tasks` / `orders` / `shipments` / `sku_master`），均带 `RESTART IDENTITY CASCADE` 重置自增序列，适合压测前彻底重置环境
+
+> 注：Windows + PowerShell 下 `npm run db:clean-sku -- --all` 的参数透传不稳定，已改用独立的 `db:clean-all` 别名，直接运行即可。
 
 ### 4. 启动开发服务器
 
@@ -176,7 +178,8 @@ vercel --prod
 npm run db:create-tables    # 建表（幂等）
 npm run db:seed             # 初始化解析规则
 npm run db:seed-data        # 生成压测数据
-npm run db:clean-sku        # 清理压测 SKU 主数据（加 -- --all 清理全部压测数据）
+npm run db:clean-sku        # 清理压测 SKU 主数据
+npm run db:clean-all        # 清理全部压测数据（运单 + 异步任务链路 + SKU）
 npm run benchmark           # 压测
 npm run dev                 # 开发服务器
 npm run build               # 生产构建
