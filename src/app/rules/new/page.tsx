@@ -120,13 +120,30 @@ export default function NewRulePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rows: fileRows, fileType: rule.fileType, fileName }),
     });
+
     if (!res.ok) {
-      const err = await res.json();
+      let err: { error?: string } = {};
+      try {
+        err = await res.json();
+      } catch {
+        const text = await res.text();
+        err.error = text || `AI分析失败 (${res.status})`;
+      }
       showToast(err.error || "AI分析失败", "error");
       setAiLoading(false);
       return;
     }
-    const result: AiRuleResponse = await res.json();
+
+    let result: AiRuleResponse;
+    try {
+      result = await res.json();
+    } catch {
+      const text = await res.text();
+      showToast(text || "AI分析返回格式异常", "error");
+      setAiLoading(false);
+      return;
+    }
+
     setAiResponse(result);
     setRule(result.rule);
     setStep("edit");

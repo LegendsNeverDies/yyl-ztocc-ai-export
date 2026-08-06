@@ -267,10 +267,12 @@ export interface TraceEventRow {
 
 // 监控聚合
 export interface MonitorSummary {
-  throughput: { minute: string; success_rows: number }[];  // 最近5分钟每分钟成功行数
+  throughput: { minute: string; success_rows: number }[];  // 最近10分钟每分钟成功行数（基于批次性能日志）
   queue_backlog: {
-    pending_batches: number;
-    pending_rows: number;
+    pending_batches: number;      // PENDING 批次数（等待处理）
+    pending_rows: number;         // PENDING 批次待处理行数
+    processing_batches: number;   // PROCESSING 批次数（处理中，在途）
+    processing_rows: number;      // PROCESSING 批次在途行数
     status: 'ok' | 'warning' | 'critical';
   };
   stage_duration: {
@@ -281,7 +283,15 @@ export interface MonitorSummary {
   }[];
   error_distribution: { error_code: string; count: number; reason: string }[];
   slow_batches_top10: BatchPerformanceRow[];
-  failed_tasks_recent: { id: string; file_name: string; failed_rows: number; created_at: string }[];
+  failed_tasks_recent: {
+    id: string;
+    file_name: string;
+    failed_rows: number;
+    success_rows: number;
+    total_rows: number;
+    status: string;
+    created_at: string;
+  }[];
   debug_message?: string;
   debug_details?: string[];
 }

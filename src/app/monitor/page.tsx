@@ -74,9 +74,9 @@ export default function MonitorPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         {/* 1. 实时吞吐量 */}
         <div className="card">
-          <h2 className="mb-3 text-base font-semibold text-[#1d2129]">实时吞吐量（近5分钟）</h2>
+          <h2 className="mb-3 text-base font-semibold text-[#1d2129]">实时吞吐量（近10分钟）</h2>
           {summary.throughput.length === 0 ? (
-            <EmptyState title="暂无数据" description="最近5分钟无已完成任务" />
+            <EmptyState title="暂无数据" description="最近10分钟无批次完成记录" />
           ) : (
             <div className="flex h-40 items-end gap-2">
               {summary.throughput.map((t, i) => (
@@ -111,13 +111,21 @@ export default function MonitorPage() {
                 "text-2xl font-bold",
                 backlogStatus.status === "ok" ? "text-[#00b42c]" : backlogStatus.status === "warning" ? "text-[#ff7d00]" : "text-[#f53f3f]"
               )}>
-                {backlogStatus.pending_batches}
+                {backlogStatus.pending_batches + backlogStatus.processing_batches}
               </span>
-              <span className="text-sm text-[#86909c]">个待处理批次</span>
+              <span className="text-sm text-[#86909c]">个未完成批次</span>
             </div>
-            <div className="mt-2 text-sm text-[#4e5969]">
-              待处理行数：<span className="font-medium">{backlogStatus.pending_rows}</span> 行
-              {backlogStatus.status === "warning" && <span className="ml-2 text-[#ff7d00]">（超过 5000 行预警阈值）</span>}
+            <div className="mt-2 space-y-1 text-sm text-[#4e5969]">
+              <div>
+                待处理（PENDING）：<span className="font-medium">{backlogStatus.pending_batches}</span> 批 /
+                <span className="font-medium"> {backlogStatus.pending_rows}</span> 行
+              </div>
+              <div>
+                处理中（PROCESSING）：<span className="font-medium">{backlogStatus.processing_batches}</span> 批 /
+                <span className="font-medium"> {backlogStatus.processing_rows}</span> 行
+              </div>
+              {backlogStatus.status === "warning" && <span className="text-[#ff7d00]">（在途行数超过 5000 行预警阈值）</span>}
+              {backlogStatus.status === "critical" && <span className="text-[#f53f3f]">（在途行数超过 20000 行告警阈值）</span>}
             </div>
           </div>
         </div>
@@ -233,6 +241,11 @@ export default function MonitorPage() {
                   <div className="flex items-center gap-2">
                     <span className="truncate max-w-[200px]">{t.file_name}</span>
                     <span className="tag tag-red">{t.failed_rows} 行失败</span>
+                    {t.status === "PROCESSING" ? (
+                      <span className="tag tag-teal">处理中 {t.success_rows}/{t.total_rows}</span>
+                    ) : (
+                      <span className="tag tag-orange">{t.status}</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 text-xs text-[#86909c]">
                     <span>{formatDateTime(t.created_at)}</span>

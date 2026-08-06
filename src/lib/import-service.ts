@@ -724,32 +724,49 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
   };
 
   try {
-  // 1. 最近5分钟吞吐：按 completed_at 分钟分桶聚合 success_rows（从 import_tasks）
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+  // 1. 最近10分钟吞吐：基于 batch_performance_log（批次完成即写入，能反映进行中任务的实时进度）
+  //    按分钟分桶聚合 success_count，比任务级 completedAt 粒度更细
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000);
   const throughputRows = await db
     .select({
-      minute: drizzleSql<string>`to_char(date_trunc('minute', ${importTasks.completedAt}), 'HH24:MI')`,
-      success_rows: drizzleSql<number>`sum(${importTasks.successRows})`,
+      minute: drizzleSql<string>`to_char(date_trunc('minute', ${batchPerformanceLog.createdAt}), 'HH24:MI')`,
+      success_rows: drizzleSql<number>`sum(${batchPerformanceLog.successCount})`,
     })
-    .from(importTasks)
-    .where(and(gte(importTasks.completedAt, fiveMinAgo), inArray(importTasks.status, ["COMPLETED", "PARTIAL_SUCCESS"])))
-    .groupBy(drizzleSql`date_trunc('minute', ${importTasks.completedAt})`)
-    .orderBy(drizzleSql`date_trunc('minute', ${importTasks.completedAt})`);
+    .from(batchPerformanceLog)
+    .where(gte(batchPerformanceLog.createdAt, tenMinAgo))
+    .groupBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`)
+    .orderBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`);
 
-  // 2. 队列积压：pending 批次数 + 对应行数
+  // 2. 队列积压：PENDING（待处理）+ PROCESSING（处理中/在途）
   const backlogRows = await db
     .select({
+      status: importTaskBatches.status,
       pending_batches: drizzleSql<number>`count(*)`,
       pending_rows: drizzleSql<number>`coalesce(sum(${importTaskBatches.endRow} - ${importTaskBatches.startRow}), 0)`,
     })
     .from(importTaskBatches)
-    .where(eq(importTaskBatches.status, "PENDING"));
-  const pendingBatches = Number(backlogRows[0]?.pending_batches ?? 0);
-  const pendingRows = Number(backlogRows[0]?.pending_rows ?? 0);
-  // 队列积压预警：>5000 行橙色预警；查询本身失败或积压超过 20000 行红色告警
+    .where(inArray(importTaskBatches.status, ["PENDING", "PROCESSING"]))
+    .groupBy(importTaskBatches.status);
+  let pendingBatches = 0;
+  let pendingRows = 0;
+  let processingBatches = 0;
+  let processingRows = 0;
+  for (const r of backlogRows) {
+    const batches = Number(r.pending_batches ?? 0);
+    const rows = Number(r.pending_rows ?? 0);
+    if (r.status === "PENDING") {
+      pendingBatches = batches;
+      pendingRows = rows;
+    } else if (r.status === "PROCESSING") {
+      processingBatches = batches;
+      processingRows = rows;
+    }
+  }
+  const totalInFlightRows = pendingRows + processingRows;
+  // 队列积压预警：>5000 行橙色预警；积压超过 20000 行红色告警
   let backlogStatus: "ok" | "warning" | "critical" = "ok";
-  if (pendingRows > 20000) backlogStatus = "critical";
-  else if (pendingRows > 5000) backlogStatus = "warning";
+  if (totalInFlightRows > 20000) backlogStatus = "critical";
+  else if (totalInFlightRows > 5000) backlogStatus = "warning";
 
   // 3. 阶段耗时分布（基于 batch_performance_log 最近1小时）
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -814,22 +831,35 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
     created_at: r.createdAt?.toISOString() ?? "",
   }));
 
-  // 6. 最近失败任务
+  // 6. 最近失败/部分成功任务（含处理中但有失败行的任务）
+  //    终态：FAILED / PARTIAL_SUCCESS
+  //    进行中：PROCESSING 且 failed_rows > 0（部分行已失败，值得关注）
   const failedTasks = await db
     .select({
       id: importTasks.id,
       file_name: importTasks.fileName,
       failed_rows: importTasks.failedRows,
+      success_rows: importTasks.successRows,
+      total_rows: importTasks.totalRows,
+      status: importTasks.status,
       created_at: importTasks.createdAt,
     })
     .from(importTasks)
-    .where(inArray(importTasks.status, ["FAILED", "PARTIAL_SUCCESS"]))
+    .where(
+      and(
+        drizzleSql`(${importTasks.status} IN ('FAILED', 'PARTIAL_SUCCESS')
+           OR (${importTasks.status} = 'PROCESSING' AND ${importTasks.failedRows} > 0))`
+      )
+    )
     .orderBy(desc(importTasks.createdAt))
     .limit(10);
   const failedTasksRecent = failedTasks.map((r) => ({
     id: r.id,
     file_name: r.file_name,
     failed_rows: r.failed_rows,
+    success_rows: r.success_rows,
+    total_rows: r.total_rows,
+    status: r.status,
     created_at: r.created_at?.toISOString() ?? "",
   }));
 
@@ -841,6 +871,8 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
       queue_backlog: {
         pending_batches: pendingBatches,
         pending_rows: pendingRows,
+        processing_batches: processingBatches,
+        processing_rows: processingRows,
         status: backlogStatus,
       },
       stage_duration: stageDuration,
