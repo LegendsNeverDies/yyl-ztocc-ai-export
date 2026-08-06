@@ -91,9 +91,12 @@ export async function POST(req: NextRequest) {
     const ruleId = formData.get("rule_id") as string | null;
     const batchSizeStr = formData.get("batch_size") as string | null;
     const totalRowsStr = formData.get("total_rows") as string | null;
+    // 二步上传：第一步只传元数据，file_name 作为普通字段（file 可不传）
+    const fileNameStr = (formData.get("file_name") as string | null) || (file ? file.name : null);
 
-    if (!file) {
-      return NextResponse.json({ error: "缺少 file 字段" }, { status: 400 });
+    // 二步上传第一步允许不传 file（只传 total_rows + file_name + file_type）
+    if (!totalRowsStr && !file) {
+      return NextResponse.json({ error: "缺少 file 或 total_rows 字段" }, { status: 400 });
     }
     if (!ruleId) {
       return NextResponse.json({ error: "缺少 rule_id 字段" }, { status: 400 });
@@ -109,7 +112,7 @@ export async function POST(req: NextRequest) {
       const totalRows = Math.max(0, parseInt(totalRowsStr, 10));
       const batchSize = batchSizeStr ? Math.max(250, Math.min(2000, parseInt(batchSizeStr, 10))) : 1000;
       const created = await createImportTaskFromMeta({
-        fileName: file ? file.name : "unknown",
+        fileName: fileNameStr || "unknown",
         fileType: (formData.get("file_type") as string) === "pdf" ? "pdf" : "excel",
         ruleId,
         totalRows,

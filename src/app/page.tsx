@@ -60,24 +60,36 @@ export default function HomePage() {
     setSelectedRule(rule);
   }, []);
 
-  // 提交：创建异步导入任务，跳转任务进度页
+  // 提交：二步上传——先创建任务（只传元数据，1s 内返回 task_id），再异步上传文件
   const handleCreateTask = useCallback(async () => {
-    if (!file || !selectedRule) return;
+    if (!file || !selectedRule || !parsedFile) return;
     setSubmitting(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("rule_id", selectedRule.id);
-      formData.append("batch_size", "1000");
+      // 第一步：只传元数据，不传 file，立即拿到 task_id
+      const metaForm = new FormData();
+      metaForm.append("file_name", file.name);
+      metaForm.append("file_type", parsedFile.fileType);
+      metaForm.append("rule_id", selectedRule.id);
+      metaForm.append("total_rows", String(parsedFile.rows.length));
+      metaForm.append("batch_size", "1000");
 
-      const res = await fetch("/api/import-tasks", { method: "POST", body: formData });
+      const res = await fetch("/api/import-tasks", { method: "POST", body: metaForm });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || `创建任务失败 (${res.status})`);
       }
       const data = await res.json();
-      showToast(`任务已创建：${data.total_rows} 行，${data.total_batches} 个批次`, "success");
-      // 跳转任务进度页
+      showToast(`任务已创建：${data.total_rows} 行，${data.total_batches} 个批次，正在上传文件...`, "success");
+
+      // 第二步：后台异步上传文件（不等待），立即跳转任务进度页
+      const uploadUrl = data.upload_url as string;
+      const uploadForm = new FormData();
+      uploadForm.append("file", file);
+      void fetch(uploadUrl, { method: "POST", body: uploadForm }).catch((e) => {
+        console.error("异步上传文件失败:", e);
+      });
+
+      // 立即跳转，不等待文件上传完成
       router.push(`/tasks/${data.task_id}`);
     } catch (err) {
       console.error(err);
@@ -85,7 +97,7 @@ export default function HomePage() {
     } finally {
       setSubmitting(false);
     }
-  }, [file, selectedRule, router, showToast]);
+  }, [file, selectedRule, parsedFile, router, showToast]);
 
   const steps = [
     { key: "upload", label: "上传文件", desc: "Excel / PDF 出库单" },
