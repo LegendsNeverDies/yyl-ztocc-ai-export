@@ -45,10 +45,9 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
 
   const fileData = serializeParsedFile(params.parsedFile);
 
-  // 同一事务：建任务 + 建批次 + 写 Outbox 事件 + 写 trace
-  await db.transaction(async (tx) => {
+  const executeTaskCreation = async (executor: typeof db) => {
     // 1. 任务主记录
-    await tx.insert(importTasks).values({
+    await executor.insert(importTasks).values({
       id: taskId,
       traceId,
       fileName: params.fileName,
@@ -107,22 +106,40 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
 
     // 批量插入批次记录
     for (let i = 0; i < batchRows.length; i += 500) {
-      await tx.insert(importTaskBatches).values(batchRows.slice(i, i + 500));
+      await executor.insert(importTaskBatches).values(batchRows.slice(i, i + 500));
     }
     // 批量插入 Outbox
     for (let i = 0; i < outboxRows.length; i += 500) {
-      await tx.insert(eventOutbox).values(outboxRows.slice(i, i + 500));
+      await executor.insert(eventOutbox).values(outboxRows.slice(i, i + 500));
     }
 
     // trace：任务创建事件
-    await tx.insert(traceEvents).values({
+    await executor.insert(traceEvents).values({
       traceId,
       taskId,
       eventName: "ImportTaskCreated",
       eventStatus: "PENDING",
       message: `用户上传文件 ${params.fileName}，共 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元`,
     });
-  });
+  };
+
+  // neon-http 可能不支持 transaction，若不支持则降级为顺序执行。
+  if (typeof db.transaction === "function") {
+    try {
+      await db.transaction(async (tx) => {
+        await executeTaskCreation(tx);
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("No transactions support in neon-http driver")) {
+        console.warn("[import-service] neon-http 不支持事务，已降级为非事务性导入任务创建");
+        await executeTaskCreation(db);
+      } else {
+        throw error;
+      }
+    }
+  } else {
+    await executeTaskCreation(db);
+  }
 
   return { taskId, traceId, totalRows, totalBatches };
 }
