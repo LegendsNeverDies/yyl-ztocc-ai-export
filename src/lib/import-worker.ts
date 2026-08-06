@@ -357,7 +357,7 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
   });
 
   const batchId = taskId;
-  const shipmentRows: { id: string; externalCode: string | null; storeName: string | null; receiverName: string | null; receiverPhone: string | null; receiverAddress: string | null; remark: string | null; skuCount: number; totalQuantity: string; batchId: string }[] = [];
+  const shipmentRows: { id: string; externalCode: string | null; storeName: string | null; receiverName: string | null; receiverPhone: string | null; receiverAddress: string | null; remark: string | null; skuCount: number; totalQuantity: number; batchId: string }[] = [];
   const orderRowsAll: { shipmentId: string; skuCode: string; skuName: string; skuQuantity: string; skuSpec: string | null; remark: string | null }[] = [];
 
   for (const group of groups.values()) {
@@ -381,7 +381,7 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
       receiverAddress: pick("receiverAddress"),
       remark: pick("remark"),
       skuCount: group.length,
-      totalQuantity: String(totalQty),
+      totalQuantity: totalQty,
       batchId,
     });
 
@@ -403,7 +403,7 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
     const res = await query(
       `INSERT INTO shipments (id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
        SELECT id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id
-       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int[], $9::text[], $10::uuid[])
+       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int[], $9::numeric[], $10::uuid[])
          AS t(id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
        ON CONFLICT (external_code) WHERE external_code IS NOT NULL DO NOTHING
        RETURNING id`,
