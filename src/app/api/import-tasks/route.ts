@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createImportTask } from "@/lib/import-service";
+import { createImportTask, createImportTaskFromMeta } from "@/lib/import-service";
 import { getRule } from "@/lib/server-actions";
 import { readFile } from "@/lib/file-reader";
 import { db } from "@/lib/db";
@@ -79,6 +79,7 @@ export async function POST(req: NextRequest) {
     const file = formData.get("file") as File | null;
     const ruleId = formData.get("rule_id") as string | null;
     const batchSizeStr = formData.get("batch_size") as string | null;
+    const totalRowsStr = formData.get("total_rows") as string | null;
 
     if (!file) {
       return NextResponse.json({ error: "缺少 file 字段" }, { status: 400 });
@@ -92,8 +93,33 @@ export async function POST(req: NextRequest) {
     if (!rule) {
       return NextResponse.json({ error: `规则 ${ruleId} 不存在` }, { status: 404 });
     }
+    // 如果前端提供了 total_rows（预扫描），采用二步上传方案：先创建任务并返回上传端点
+    if (totalRowsStr) {
+      const totalRows = Math.max(0, parseInt(totalRowsStr, 10));
+      const batchSize = batchSizeStr ? Math.max(250, Math.min(2000, parseInt(batchSizeStr, 10))) : 1000;
+      const created = await createImportTaskFromMeta({
+        fileName: file ? file.name : "unknown",
+        fileType: (formData.get("file_type") as string) === "pdf" ? "pdf" : "excel",
+        ruleId,
+        totalRows,
+        batchSize,
+      });
 
-    // 读取文件为 RawRow 网格（不做规则解析）
+      const uploadUrl = new URL(`/api/import-tasks/${created.taskId}/upload`, req.url).toString();
+      const elapsed = Date.now() - startTime;
+      console.log(`[import-tasks] 任务预创建完成 task_id=${created.taskId} trace_id=${created.traceId} rows=${created.totalRows} batches=${created.totalBatches} 耗时=${elapsed}ms`);
+
+      return NextResponse.json({
+        task_id: created.taskId,
+        trace_id: created.traceId,
+        status: "PENDING",
+        total_rows: created.totalRows,
+        total_batches: created.totalBatches,
+        upload_url: uploadUrl,
+      });
+    }
+
+    // 读取文件为 RawRow 网格（不做规则解析）——兼容旧流程（注意：会阻塞请求）
     const parsedFile = await readFile(file);
 
     // 预扫描总行数（parsedFile.rows 即总行数，包含表头等非数据行；Worker 会按规则过滤）
