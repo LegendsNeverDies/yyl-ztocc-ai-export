@@ -761,8 +761,8 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
   const now = new Date();
   const buckets: { time: string; success_rows: number }[] = [];
   const bucketMap = new Map<string, number>();
-  for (const r of throughputRows as { bucket_start: Date; success_rows: string | number }[]) {
-    const key = r.bucket_start.toISOString();
+  for (const r of throughputRows as { bucket_start: string | Date; success_rows: string | number }[]) {
+    const key = new Date(r.bucket_start).toISOString();
     bucketMap.set(key, Number(r.success_rows ?? 0));
   }
   for (let i = 9; i >= 0; i--) {
