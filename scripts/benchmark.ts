@@ -18,6 +18,18 @@
 import * as fs from "fs";
 import * as path from "path";
 
+// 代理支持：如果设置了 HTTPS_PROXY 环境变量，通过代理发送请求
+const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+const _fetch: typeof globalThis.fetch = globalThis.fetch;
+if (httpsProxy) {
+  // Node 22 内置 undici，通过 node:undici 访问
+  const { ProxyAgent } = require("node:undici") as typeof import("undici");
+  const agent = new ProxyAgent(httpsProxy);
+  globalThis.fetch = ((url: string, init?: RequestInit) =>
+    _fetch(url, { ...init, dispatcher: agent } as any)) as typeof globalThis.fetch;
+  console.log(`  使用代理: ${httpsProxy}`);
+}
+
 const BASE_URL = process.env.BENCH_BASE_URL || "http://localhost:3000";
 const BENCH_FILE = process.env.BENCH_FILE || path.resolve(process.cwd(), "test-data/10000-orders.xlsx");
 
@@ -107,7 +119,11 @@ async function uploadFile(filePath: string, ruleId: string): Promise<{
   formData.append("batch_size", "1000");
 
   const t0 = Date.now();
-  const res = await fetch(`${BASE_URL}/api/import-tasks`, { method: "POST", body: formData });
+  const res = await fetch(`${BASE_URL}/api/import-tasks`, {
+    method: "POST",
+    body: formData,
+    signal: AbortSignal.timeout(120_000), // 120s 超时，避免大文件上传超时
+  });
   const elapsed_ms = Date.now() - t0;
 
   if (!res.ok) {

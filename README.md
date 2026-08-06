@@ -2,6 +2,11 @@
 
 基于 Next.js 16 App Router + TypeScript，将同步阻塞式导入链路重构为可支撑高并发的异步事件驱动架构。
 
+## 在线访问
+
+- **部署地址**：https://yyl-ztocc-ai-export.vercel.app/
+- **源码仓库**：https://github.com/LegendsNeverDies/yyl-ztocc-ai-export
+
 ## 评分标准导向设计
 
 本方案以考试评分标准为第一优先级，所有设计决策都围绕以下评分项展开：
@@ -171,8 +176,77 @@ npm run build               # 生产构建
 npm run lint                # 代码检查
 ```
 
+## 演示访问说明
+
+系统无鉴权，直接访问即可。以下页面均可直接打开：
+
+| 页面 | URL | 说明 |
+|---|---|---|
+| 导入页 | https://yyl-ztocc-ai-export.vercel.app/ | 上传文件 → 选规则 → 创建异步任务 |
+| 任务列表 | https://yyl-ztocc-ai-export.vercel.app/tasks | 查看所有任务 |
+| 任务详情 | https://yyl-ztocc-ai-export.vercel.app/tasks/:taskId | 进度、错误明细、批次性能 |
+| 监控看板 | https://yyl-ztocc-ai-export.vercel.app/monitor | 吞吐、积压、阶段耗时、错误分布 |
+| Trace 检索 | https://yyl-ztocc-ai-export.vercel.app/traces | 按 trace_id/task_id 搜索时间线 |
+| 规则管理 | https://yyl-ztocc-ai-export.vercel.app/rules | 查看解析规则 |
+
+**演示流程**：
+
+1. 访问导入页，上传 `test-data/10000-orders.xlsx`
+2. 选择解析规则（如"标准excel导入测试"）
+3. 创建任务后跳转到任务详情页，查看实时进度
+4. 切换"错误明细"Tab 查看行级错误（支持按批次/错误码筛选）
+5. 切换"批次性能"Tab 查看各阶段耗时
+6. 访问监控看板查看吞吐、队列积压、阶段耗时 P99
+7. 访问 Trace 检索页面，输入 trace_id 查看全链路时间线
+
+## 故障模拟说明
+
+### 1. SKU 查询超时降级
+
+在 `import-worker.ts` 中设置 `SKU_QUERY_TIMEOUT_MS = 100`（从 3000 改为 100ms），SKU 查询会超时触发降级：
+
+- 任务状态变为 `DEGRADED`
+- 前端显示橙色警告条："SKU 主数据查询超时，已跳过 SKU 校验"
+- 错误明细中 SKU 相关错误不再记录
+
+### 2. 批次卡死恢复
+
+手动将某个批次设为 PROCESSING 但不处理：
+
+```sql
+UPDATE import_task_batches
+SET status = 'PROCESSING', locked_at = NOW() - INTERVAL '3 minutes'
+WHERE task_id = 'xxx' AND unit_id = 'xxx_b0';
+```
+
+下次 Worker 运行时 `recoverStuckBatches()` 会自动重置为 PENDING。
+
+### 3. Outbox 投递失败
+
+手动将 event_outbox 设为 PENDING + next_retry_at 为过去时间：
+
+```sql
+UPDATE event_outbox
+SET status = 'PENDING', next_retry_at = NOW() - INTERVAL '1 minute'
+WHERE id = 1;
+```
+
+Dispatcher 恢复后会重新投递。
+
+### 4. 重复上传
+
+同一文件重复上传会创建独立任务，外部编码重复检测（E005）会标记重复行，不会产生重复运单。
+
+### 5. Worker 触发
+
+- 手动触发：`POST /api/worker/run`（需 Header `x-worker-api-key`）
+- Cron 触发：`GET /api/worker/run`（无鉴权，便于 GitHub Actions 调用）
+
 ## 文档
 
+- [架构设计文档](./ARCHITECTURE.md) — 异步任务流程图、Outbox、批量处理策略、数据模型
+- [接口文档](./API.md) — 上传、任务查询、错误查询、Trace 查询、监控聚合
+- [压测报告](./BENCHMARK_REPORT.md) — 10,000 行压测结果，证明 ≤ 60 秒
 - [重构假设说明](./REFACTOR_ASSUMPTIONS.md) — 架构决策、容量推导、幂等设计、降级策略
 - [AGENTS.md](./AGENTS.md) — Next.js 16 注意事项
 - [CLAUDE.md](./CLAUDE.md) — V2 原始架构说明
