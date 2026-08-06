@@ -134,7 +134,8 @@ export async function POST(req: NextRequest) {
     }
 
     // 读取文件为 RawRow 网格（不做规则解析）——兼容旧流程（注意：会阻塞请求）
-    const parsedFile = await readFile(file);
+    // 走到此处说明未走二步上传分支（totalRowsStr 为空），前面已校验 file 必存在
+    const parsedFile = await readFile(file as File);
 
     // 预扫描总行数（parsedFile.rows 即总行数，包含表头等非数据行；Worker 会按规则过滤）
     const batchSize = batchSizeStr ? Math.max(250, Math.min(2000, parseInt(batchSizeStr, 10))) : 1000;
@@ -142,7 +143,7 @@ export async function POST(req: NextRequest) {
     // 创建任务（同事务写入任务+批次+Outbox+解析切片+trace）
     // 解析前置：上传时就 parseFile 一次，结果按批存 import_task_rows，worker 只读切片
     const created = await createImportTask({
-      fileName: file.name,
+      fileName: (file as File).name,
       fileType: parsedFile.fileType,
       ruleId,
       rule,
