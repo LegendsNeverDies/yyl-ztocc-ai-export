@@ -143,7 +143,8 @@ function nearestAnchor(x: number, anchors: number[]): number {
 }
 
 export async function readFile(file: File): Promise<ParsedFile> {
-  const ext = file.name.split(".").pop()?.toLowerCase();
+  const rawExt = file.name.split(".").pop() || "";
+  const ext = rawExt.toLowerCase();
   if (ext === "xlsx" || ext === "xls") {
     return readExcel(file);
   }

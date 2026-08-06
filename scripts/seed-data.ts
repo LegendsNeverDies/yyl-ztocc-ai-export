@@ -54,11 +54,27 @@ async function seedSkuMaster() {
       chunkParams.push(code, name, spec, unit);
     });
     const placeholders = chunk.map((_, idx) => `($${idx * 4 + 1}, $${idx * 4 + 2}, $${idx * 4 + 3}, $${idx * 4 + 4})`).join(", ");
-    await sql.query(
-      `INSERT INTO sku_master (sku_code, name, spec, unit) VALUES ${placeholders}`,
-      chunkParams
-    );
+    const insertSql = `INSERT INTO sku_master (sku_code, name, spec, unit) VALUES ${placeholders}`;
+
+    // Neon HTTP 连续快速请求可能超时，加重试 + 批次间延迟
+    let lastErr: unknown;
+    let success = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await sql.query(insertSql, chunkParams);
+        success = true;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const backoff = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s, 4s
+        await new Promise((r) => setTimeout(r, backoff));
+      }
+    }
+    if (!success) throw lastErr;
+
     process.stdout.write(`\r  已写入 ${Math.min(i + BATCH, SKU_COUNT)}/${SKU_COUNT}`);
+    // 批次间 200ms 延迟，避免 Neon HTTP 连续请求超时
+    await new Promise((r) => setTimeout(r, 200));
   }
   console.log("\n✅ SKU 主数据灌入完成");
   return allCodes;

@@ -22,7 +22,8 @@ export function FileUploadZone({ onFileSelected, disabled }: FileUploadZoneProps
 
   const validateAndSelect = useCallback(
     (file: File) => {
-      const ext = "." + file.name.split(".").pop()?.toLowerCase();
+      const rawExt = file.name.split(".").pop() || "";
+      const ext = "." + rawExt.toLowerCase();
       if (!ALLOWED_EXTENSIONS.includes(ext) && !ALLOWED_MIMES.includes(file.type)) {
         return false;
       }
