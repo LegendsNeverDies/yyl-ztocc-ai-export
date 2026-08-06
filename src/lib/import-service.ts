@@ -45,7 +45,8 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
 
   const fileData = serializeParsedFile(params.parsedFile);
 
-  const executeTaskCreation = async (executor: typeof db) => {
+  type TaskExecutor = Pick<typeof db, "insert">;
+  const executeTaskCreation = async (executor: TaskExecutor) => {
     // 1. 任务主记录
     await executor.insert(importTasks).values({
       id: taskId,
@@ -127,7 +128,7 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
   if (typeof db.transaction === "function") {
     try {
       await db.transaction(async (tx) => {
-        await executeTaskCreation(tx);
+        await executeTaskCreation(tx as TaskExecutor);
       });
     } catch (error) {
       if (error instanceof Error && error.message.includes("No transactions support in neon-http driver")) {
