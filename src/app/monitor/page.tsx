@@ -17,6 +17,12 @@ export default function MonitorPage() {
       if (!res.ok) return;
       const data: MonitorSummary = await res.json();
       setSummary(data);
+      // 有积压时顺带驱动 Worker，避免监控页观察时无人消费批次
+      const hasBacklog =
+        data.queue_backlog.pending_batches > 0 || data.queue_backlog.processing_batches > 0;
+      if (hasBacklog) {
+        fetch("/api/worker/run", { method: "POST" }).catch(() => {});
+      }
     } catch {
       /* ignore */
     } finally {
@@ -74,9 +80,9 @@ export default function MonitorPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         {/* 1. 实时吞吐量 */}
         <div className="card">
-          <h2 className="mb-3 text-base font-semibold text-[#1d2129]">实时吞吐量（近10分钟）</h2>
+          <h2 className="mb-3 text-base font-semibold text-[#1d2129]">实时吞吐量（近5分钟）</h2>
           {summary.throughput.length === 0 ? (
-            <EmptyState title="暂无数据" description="最近10分钟无批次完成记录" />
+            <EmptyState title="暂无数据" description="最近5分钟无批次完成记录" />
           ) : (
             <div className="flex h-40 items-end gap-2">
               {summary.throughput.map((t, i) => (

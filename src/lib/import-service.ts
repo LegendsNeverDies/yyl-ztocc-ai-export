@@ -726,18 +726,36 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
   };
 
   try {
-  // 1. 最近10分钟吞吐：基于 batch_performance_log（批次完成即写入，能反映进行中任务的实时进度）
-  //    按分钟分桶聚合 success_count，比任务级 completedAt 粒度更细
-  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000);
-  const throughputRows = await db
+  // 1. 最近5分钟吞吐：优先用 batch_performance_log（批次级，粒度细）
+  //    若为空（批次仍在处理中，尚未写入性能日志），回退用 import_tasks 任务级 successRows
+  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+  let throughputRows = await db
     .select({
       minute: drizzleSql<string>`to_char(date_trunc('minute', ${batchPerformanceLog.createdAt}), 'HH24:MI')`,
       success_rows: drizzleSql<number>`sum(${batchPerformanceLog.successCount})`,
     })
     .from(batchPerformanceLog)
-    .where(gte(batchPerformanceLog.createdAt, tenMinAgo))
+    .where(gte(batchPerformanceLog.createdAt, fiveMinAgo))
     .groupBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`)
     .orderBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`);
+
+  // 回退：批次日志为空时，用 import_tasks 的 successRows 按分钟分桶（任务级，粗粒度但有数据）
+  if (throughputRows.length === 0) {
+    throughputRows = await db
+      .select({
+        minute: drizzleSql<string>`to_char(date_trunc('minute', ${importTasks.startedAt}), 'HH24:MI')`,
+        success_rows: drizzleSql<number>`sum(${importTasks.successRows})`,
+      })
+      .from(importTasks)
+      .where(
+        and(
+          gte(importTasks.startedAt, fiveMinAgo),
+          inArray(importTasks.status, ["PROCESSING", "COMPLETED", "PARTIAL_SUCCESS"])
+        )
+      )
+      .groupBy(drizzleSql`date_trunc('minute', ${importTasks.startedAt})`)
+      .orderBy(drizzleSql`date_trunc('minute', ${importTasks.startedAt})`);
+  }
 
   // 2. 队列积压：PENDING（待处理）+ PROCESSING（处理中/在途）
   const backlogRows = await db
