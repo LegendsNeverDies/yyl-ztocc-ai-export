@@ -267,7 +267,7 @@ export interface TraceEventRow {
 
 // 监控聚合
 export interface MonitorSummary {
-  throughput: { minute: string; success_rows: number }[];  // 最近10分钟每分钟成功行数（基于批次性能日志）
+  throughput: { time: string; success_rows: number }[];  // 最近5分钟每30秒成功行数（折线图）
   queue_backlog: {
     pending_batches: number;      // PENDING 批次数（等待处理）
     pending_rows: number;         // PENDING 批次待处理行数

@@ -50,6 +50,29 @@ export default function MonitorPage() {
   const totalErrors = summary.error_distribution.reduce((s, e) => s + e.count, 0);
   const backlogStatus = summary.queue_backlog;
 
+  // 折线图坐标计算
+  const chartW = 520;
+  const chartH = 140;
+  const padL = 8;
+  const padR = 8;
+  const padT = 10;
+  const padB = 18;
+  const innerW = chartW - padL - padR;
+  const innerH = chartH - padT - padB;
+  const tp = summary.throughput;
+  const stepX = tp.length > 1 ? innerW / (tp.length - 1) : innerW;
+  const points = tp.map((t, i) => {
+    const x = padL + i * stepX;
+    const y = padT + innerH - (t.success_rows / maxThroughput) * innerH;
+    return { x, y, ...t };
+  });
+  const linePath = points.length > 0
+    ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")
+    : "";
+  const areaPath = points.length > 0
+    ? `${linePath} L ${padL + (tp.length - 1) * stepX} ${padT + innerH} L ${padL} ${padT + innerH} Z`
+    : "";
+
   return (
     <div className="mx-auto max-w-6xl px-6 py-8 space-y-6">
       {summary.debug_message && (
@@ -84,20 +107,51 @@ export default function MonitorPage() {
           {summary.throughput.length === 0 ? (
             <EmptyState title="暂无数据" description="最近5分钟无批次完成记录" />
           ) : (
-            <div className="flex h-40 items-end gap-2">
-              {summary.throughput.map((t, i) => (
-                <div key={i} className="flex flex-1 flex-col items-center gap-1">
-                  <div
-                    className="w-full rounded-t bg-[#0fc6c2] transition-all"
-                    style={{ height: `${(t.success_rows / maxThroughput) * 100}%`, minHeight: "2px" }}
-                    title={`${t.minute}: ${t.success_rows} 行`}
-                  />
-                  <span className="text-[10px] text-[#86909c]">{t.minute}</span>
-                </div>
-              ))}
+            <div className="w-full overflow-x-auto">
+              <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ minWidth: 360 }}>
+                <defs>
+                  <linearGradient id="tpArea" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#0fc6c2" stopOpacity="0.25" />
+                    <stop offset="100%" stopColor="#0fc6c2" stopOpacity="0" />
+                  </linearGradient>
+                </defs>
+                {/* 网格线 */}
+                {[0.25, 0.5, 0.75].map((r) => (
+                  <line key={r} x1={padL} y1={padT + innerH * r} x2={padL + innerW} y2={padT + innerH * r} stroke="#e5e6eb" strokeWidth="1" strokeDasharray="3 3" />
+                ))}
+                {/* 面积 */}
+                {areaPath && <path d={areaPath} fill="url(#tpArea)" />}
+                {/* 折线 */}
+                {linePath && <path d={linePath} fill="none" stroke="#0fc6c2" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
+                {/* 数据点 */}
+                {points.map((p, i) => (
+                  <g key={i}>
+                    <circle cx={p.x} cy={p.y} r="2.5" fill="#0fc6c2" />
+                    {p.success_rows > 0 && (
+                      <title>{`${new Date(p.time).toLocaleTimeString("zh-CN", { hour12: false })}: ${p.success_rows} 行`}</title>
+                    )}
+                  </g>
+                ))}
+                {/* X轴标签：首、中、尾 */}
+                {points.length > 0 && (
+                  <>
+                    <text x={padL} y={chartH - 4} textAnchor="start" fontSize="9" fill="#86909c">
+                      {new Date(points[0].time).toLocaleTimeString("zh-CN", { hour12: false, minute: "2-digit", second: "2-digit" })}
+                    </text>
+                    {points.length > 2 && (
+                      <text x={padL + innerW / 2} y={chartH - 4} textAnchor="middle" fontSize="9" fill="#86909c">
+                        {new Date(points[Math.floor(points.length / 2)].time).toLocaleTimeString("zh-CN", { hour12: false, minute: "2-digit", second: "2-digit" })}
+                      </text>
+                    )}
+                    <text x={padL + innerW} y={chartH - 4} textAnchor="end" fontSize="9" fill="#86909c">
+                      {new Date(points[points.length - 1].time).toLocaleTimeString("zh-CN", { hour12: false, minute: "2-digit", second: "2-digit" })}
+                    </text>
+                  </>
+                )}
+              </svg>
             </div>
           )}
-          <div className="mt-2 text-xs text-[#86909c]">每分钟成功入库行数</div>
+          <div className="mt-2 text-xs text-[#86909c]">每30秒成功入库行数（峰值 {maxThroughput} 行/窗口）</div>
         </div>
 
         {/* 2. 队列积压 */}

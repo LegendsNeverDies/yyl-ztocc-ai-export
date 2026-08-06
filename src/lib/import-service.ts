@@ -726,24 +726,24 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
   };
 
   try {
-  // 1. 最近5分钟吞吐：优先用 batch_performance_log（批次级，粒度细）
-  //    若为空（批次仍在处理中，尚未写入性能日志），回退用 import_tasks 任务级 successRows
+  // 1. 最近5分钟吞吐：按30秒窗口分桶，共10个点，保证折线图连续波动
+  //    优先用 batch_performance_log（批次级）；为空则回退 import_tasks 任务级
   const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
   let throughputRows = await db
     .select({
-      minute: drizzleSql<string>`to_char(date_trunc('minute', ${batchPerformanceLog.createdAt}), 'HH24:MI')`,
+      bucket_start: drizzleSql<Date>`date_bin('30 seconds', ${batchPerformanceLog.createdAt}, '1970-01-01')`,
       success_rows: drizzleSql<number>`sum(${batchPerformanceLog.successCount})`,
     })
     .from(batchPerformanceLog)
     .where(gte(batchPerformanceLog.createdAt, fiveMinAgo))
-    .groupBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`)
-    .orderBy(drizzleSql`date_trunc('minute', ${batchPerformanceLog.createdAt})`);
+    .groupBy(drizzleSql`date_bin('30 seconds', ${batchPerformanceLog.createdAt}, '1970-01-01')`)
+    .orderBy(drizzleSql`date_bin('30 seconds', ${batchPerformanceLog.createdAt}, '1970-01-01')`);
 
-  // 回退：批次日志为空时，用 import_tasks 的 successRows 按分钟分桶（任务级，粗粒度但有数据）
+  // 回退：批次日志为空时，用 import_tasks 的 successRows 按30秒分桶
   if (throughputRows.length === 0) {
     throughputRows = await db
       .select({
-        minute: drizzleSql<string>`to_char(date_trunc('minute', ${importTasks.startedAt}), 'HH24:MI')`,
+        bucket_start: drizzleSql<Date>`date_bin('30 seconds', ${importTasks.startedAt}, '1970-01-01')`,
         success_rows: drizzleSql<number>`sum(${importTasks.successRows})`,
       })
       .from(importTasks)
@@ -753,8 +753,25 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
           inArray(importTasks.status, ["PROCESSING", "COMPLETED", "PARTIAL_SUCCESS"])
         )
       )
-      .groupBy(drizzleSql`date_trunc('minute', ${importTasks.startedAt})`)
-      .orderBy(drizzleSql`date_trunc('minute', ${importTasks.startedAt})`);
+      .groupBy(drizzleSql`date_bin('30 seconds', ${importTasks.startedAt}, '1970-01-01')`)
+      .orderBy(drizzleSql`date_bin('30 seconds', ${importTasks.startedAt}, '1970-01-01')`);
+  }
+
+  // 补齐5分钟内10个30秒窗口（空窗点补0），保证折线图有连续的波动曲线
+  const now = new Date();
+  const buckets: { time: string; success_rows: number }[] = [];
+  const bucketMap = new Map<string, number>();
+  for (const r of throughputRows as { bucket_start: Date; success_rows: string | number }[]) {
+    const key = r.bucket_start.toISOString();
+    bucketMap.set(key, Number(r.success_rows ?? 0));
+  }
+  for (let i = 9; i >= 0; i--) {
+    const bucketTime = new Date(Math.floor((now.getTime() - i * 30 * 1000) / 30000) * 30000);
+    const key = bucketTime.toISOString();
+    buckets.push({
+      time: bucketTime.toISOString(),
+      success_rows: bucketMap.get(key) ?? 0,
+    });
   }
 
   // 2. 队列积压：PENDING（待处理）+ PROCESSING（处理中/在途）
@@ -884,10 +901,7 @@ export async function getMonitorSummary(): Promise<MonitorSummary> {
   }));
 
     return {
-      throughput: throughputRows.map((r) => ({
-        minute: r.minute,
-        success_rows: Number(r.success_rows ?? 0),
-      })),
+      throughput: buckets,
       queue_backlog: {
         pending_batches: pendingBatches,
         pending_rows: pendingRows,
