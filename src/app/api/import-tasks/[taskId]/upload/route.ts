@@ -6,6 +6,10 @@ export async function POST(req: NextRequest, ctx: any) {
   try {
     const params = ctx?.params ?? {};
     const taskId = params.taskId as string | undefined;
+    if (!taskId) {
+      return NextResponse.json({ error: "缺少 taskId 参数" }, { status: 400 });
+    }
+
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
     if (!file) {
