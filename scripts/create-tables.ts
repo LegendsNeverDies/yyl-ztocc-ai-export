@@ -166,7 +166,10 @@ const DDL: string[] = [
 
 // 索引（CREATE INDEX IF NOT EXISTS，幂等）
 const INDEXES: string[] = [
-  `CREATE INDEX IF NOT EXISTS shipments_external_code_idx ON shipments(external_code)`,
+  // 幂等：external_code 非空时唯一（部分唯一索引，匹配 ON CONFLICT ... WHERE external_code IS NOT NULL）
+  // 先 drop 旧普通索引（若存在），再建部分唯一索引；IF NOT EXISTS 不会升级已有普通索引
+  `DROP INDEX IF EXISTS shipments_external_code_idx`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS shipments_external_code_uniq ON shipments(external_code) WHERE external_code IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS shipments_batch_id_idx ON shipments(batch_id)`,
   `CREATE INDEX IF NOT EXISTS orders_shipment_id_idx ON orders(shipment_id)`,
   `CREATE INDEX IF NOT EXISTS orders_sku_code_idx ON orders(sku_code)`,

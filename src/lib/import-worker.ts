@@ -3,19 +3,14 @@ import { db, query, withTransaction } from "@/lib/db";
 import {
   importTasks,
   importTaskBatches,
-  importTaskErrors,
-  importTaskRows,
-  batchPerformanceLog,
   traceEvents,
   shipments,
-  orders,
   skuMaster,
 } from "@/lib/db-schema";
 import { eq, and, inArray, sql as drizzleSql } from "drizzle-orm";
 import { generateId } from "@/lib/utils";
 import { validateOrders, checkReceiverConsistency } from "@/lib/validators";
 import { maskSensitive } from "@/lib/import-serialize";
-import { loadTaskRule } from "@/lib/import-service";
 import { CONFIG, ERROR_CODES } from "@/lib/config";
 import { LRUCache } from "lru-cache";
 import type { OrderRow, ValidationError } from "@/types";
@@ -253,7 +248,7 @@ async function validateBatch(
 
   // 2. SKU 批量校验：LRU 缓存 + ANY 查询 + 3s 超时降级
   const skuCodes = Array.from(new Set(rows.map((r) => r.skuCode?.trim()).filter(Boolean) as string[]));
-  let existingSkuCodes = new Set<string>();
+  const existingSkuCodes = new Set<string>();
   let degraded = false;
 
   if (skuCodes.length > 0) {
@@ -398,14 +393,14 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
   }
 
   // 批量 UPSERT shipments（ON CONFLICT external_code DO NOTHING，防重复投递）
-  let insertedShipments = 0;
+  // 注意：numeric 列用 ::text[] 传入，在 SELECT 中 ::numeric 强制转换，避免 UNNEST 类型推断失败
   if (shipmentRows.length > 0) {
-    const res = await query(
+    await query(
       `INSERT INTO shipments (id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
-       SELECT id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id
-       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int[], $9::numeric[], $10::uuid[])
+       SELECT id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count::int, total_quantity::numeric, batch_id
+       FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
          AS t(id, external_code, store_name, receiver_name, receiver_phone, receiver_address, remark, sku_count, total_quantity, batch_id)
-       ON CONFLICT (external_code) WHERE external_code IS NOT NULL DO NOTHING
+       ON CONFLICT (external_code) DO NOTHING
        RETURNING id`,
       [
         shipmentRows.map((s) => s.id),
@@ -415,21 +410,20 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
         shipmentRows.map((s) => s.receiverPhone),
         shipmentRows.map((s) => s.receiverAddress),
         shipmentRows.map((s) => s.remark),
-        shipmentRows.map((s) => s.skuCount),
-        shipmentRows.map((s) => s.totalQuantity),
+        shipmentRows.map((s) => String(s.skuCount)),
+        shipmentRows.map((s) => String(s.totalQuantity)),
         shipmentRows.map((s) => s.batchId),
       ]
     );
-    insertedShipments = res.rowCount || 0;
   }
 
   // 批量 UPSERT orders（ON CONFLICT (shipment_id, sku_code) DO NOTHING，幂等）
-  let insertedOrders = 0;
+  // 同样用 ::text[] + ::numeric 避免 numeric 类型推断问题
   if (orderRowsAll.length > 0) {
-    const res = await query(
+    await query(
       `INSERT INTO orders (shipment_id, sku_code, sku_name, sku_quantity, sku_spec, remark)
-       SELECT shipment_id, sku_code, sku_name, sku_quantity, sku_spec, remark
-       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+       SELECT shipment_id::uuid, sku_code, sku_name, sku_quantity::numeric, sku_spec, remark
+       FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
          AS t(shipment_id, sku_code, sku_name, sku_quantity, sku_spec, remark)
        ON CONFLICT (shipment_id, sku_code) DO NOTHING
        RETURNING id`,
@@ -437,12 +431,11 @@ async function batchUpsertOrders(orderRows: OrderRow[], taskId: string): Promise
         orderRowsAll.map((o) => o.shipmentId),
         orderRowsAll.map((o) => o.skuCode),
         orderRowsAll.map((o) => o.skuName),
-        orderRowsAll.map((o) => o.skuQuantity),
+        orderRowsAll.map((o) => String(o.skuQuantity)),
         orderRowsAll.map((o) => o.skuSpec),
         orderRowsAll.map((o) => o.remark),
       ]
     );
-    insertedOrders = res.rowCount || 0;
   }
 
   return orderRows.length;

@@ -25,7 +25,9 @@ export const shipments = pgTable("shipments", {
   batchId: uuid("batch_id").notNull(),
   submittedAt: timestamp("submitted_at").defaultNow(),
 }, (t) => [
-  index("shipments_external_code_idx").on(t.externalCode),
+  // 唯一索引：external_code 非空时唯一（PG 中多个 NULL 不冲突，无需部分索引）
+  // 对应 UNNEST + ON CONFLICT (external_code) DO NOTHING 幂等写入
+  uniqueIndex("shipments_external_code_uniq").on(t.externalCode),
   index("shipments_batch_id_idx").on(t.batchId),
 ]);
 
