@@ -4,17 +4,28 @@
 
 ### 1.1 异步事件驱动架构图
 
+系统采用 **二步上传**（Two-Step Upload）方案：前端先预扫描文件得到 `total_rows`，第一步只提交元数据（1s 内返回 `task_id` + `upload_url`），用户立即跳转进度页；第二步在后台异步上传文件，服务端解析+切片+重建批次后将任务推进至 `PROCESSING`。
+
 ```
-┌──────────────┐     POST /api/import-tasks      ┌─────────────────────────────┐
-│   用户浏览器  │ ──────────────────────────────▶ │  上传 API（Next.js Route）   │
-│              │  (FormData: file+rule_id)       │  ├─ 读取文件为 RawRow 网格    │
-│              │ ◀──────────────────────────────  │  ├─ 创建 import_tasks        │
-│  task_id 返回 │  立即返回 task_id（≤1s）        │  ├─ 创建 import_task_batches  │
-│              │                                  │  ├─ 写入 event_outbox        │
-│  轮询进度     │  GET /api/import-tasks/:id     │  └─ 写入 trace_events        │
-│  (每 2s)     │ ──────────────────────────────▶ │                              │
-│              │ ◀──────────────────────────────  └─────────────────────────────┘
-└──────────────┘  返回 status/processed_rows          │ 后台 fetch
+┌──────────────┐  1. 预扫描 total_rows           ┌─────────────────────────────┐
+│   用户浏览器  │  2. POST /api/import-tasks      │  第一步 API（元数据）        │
+│              │     (file_name/type/rows/rule)  │  ├─ createImportTaskFromMeta │
+│              │ ──────────────────────────────▶ │  │   创建 import_tasks(PENDING) │
+│              │                                  │  │   创建 import_task_batches   │
+│  task_id 返回 │ ◀────────────────────────────── │  │   写入 event_outbox          │
+│  upload_url   │  立即返回 task_id + upload_url  │  └─ 写入 trace_events          │
+│              │                                  └─────────────────────────────┘
+│              │  3. 后台异步 POST {upload_url}    ┌─────────────────────────────┐
+│              │     (FormData: file)            │  第二步 API（上传文件）       │
+│              │ ──────────────────────────────▶ │  ├─ readFile() 读为 RawRow    │
+│              │                                  │  └─ attachParsedFileToTask(): │
+│              │                                  │      parseFile() 解析一次      │
+│  4. 轮询进度  │  GET /api/import-tasks/:id     │      按批切片→import_task_rows│
+│  (每 2s)     │ ──────────────────────────────▶ │      重建 batches/outbox       │
+│              │ ◀──────────────────────────────  │      状态→PROCESSING           │
+└──────────────┘  返回 status/processed_rows      │      触发 Worker              │
+                                                   └─────────────────────────────┘
+                                                   │ 后台 fetch
                                                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Outbox Dispatcher（outbox-dispatcher.ts）                       │
@@ -29,18 +40,15 @@
 │  ├─ recoverStuckBatches()：恢复超时 PROCESSING 批次              │
 │  ├─ FOR UPDATE SKIP LOCKED 原子抢占 PENDING 批次                 │
 │  ├─ processSingleBatch()：                                       │
-│  │   ├─ 幂等检查（已 COMPLETED 直接返回）                         │
-│  │   ├─ loadTaskFileData() + loadTaskRule()                      │
-│  │   ├─ parseFile() 复用 V2 规则引擎                              │
+│  │   ├─ 读 import_task_rows 切片（不再重读原文件/不再重新解析）    │
 │  │   ├─ validateBatch()：                                        │
 │  │   │   ├─ 本地格式校验（validators.ts）                        │
-│  │   │   ├─ SKU 批量校验（inArray 单次 IN 查询）                  │
+│  │   │   ├─ SKU 批量校验（inArray 单次 IN 查询 + LRU 缓存）       │
 │  │   │   └─ 外部编码重复检测（inArray 单次 IN 查询）              │
-│  │   ├─ batchInsertOrders()：                                    │
-│  │   │   ├─ shipments 批量 INSERT（100 条/批）                    │
-│  │   │   └─ orders 批量 INSERT（500 条/批）+ Promise.all 并发     │
-│  │   ├─ persistErrors()：行级错误批量写入（500 条/批）             │
-│  │   ├─ 写入 batch_performance_log                                │
+│  │   ├─ batchUpsertOrders()：                                     │
+│  │   │   ├─ shipments 批量 UPSERT（UNNEST + ON CONFLICT）         │
+│  │   │   └─ orders 批量 UPSERT（UNNEST + ON CONFLICT）            │
+│  │   ├─ finalizeBatch()：错误明细 + 性能日志 + 批次状态（一事务） │
 │  │   └─ 更新批次状态 → COMPLETED/FAILED                           │
 │  └─ aggregateTask()：聚合任务状态 → COMPLETED/PARTIAL_SUCCESS/FAILED │
 └─────────────────────────────────────────────────────────────────┘
@@ -50,9 +58,10 @@
 │  Neon Postgres                │    │  前端页面                     │
 │  ├─ import_tasks              │    │  ├─ /tasks/:id 进度轮询       │
 │  ├─ import_task_batches       │    │  ├─ /tasks/:id 错误明细       │
-│  ├─ import_task_errors        │◀───│  ├─ /monitor 监控看板         │
-│  ├─ event_outbox              │    │  └─ /traces Trace 检索        │
-│  ├─ batch_performance_log     │    └──────────────────────────────┘
+│  ├─ import_task_rows          │◀───│  ├─ /monitor 监控看板         │
+│  ├─ import_task_errors        │    │  └─ /traces Trace 检索        │
+│  ├─ event_outbox              │    └──────────────────────────────┘
+│  ├─ batch_performance_log     │
 │  ├─ trace_events              │
 │  ├─ shipments + orders        │
 │  └─ sku_master                │
@@ -63,9 +72,10 @@
 
 | 原则 | 实现 |
 |---|---|
-| 上传即返回 | 上传接口只做文件读取+任务创建，立即返回 task_id |
+| 二步上传 | 前端预扫描行数 → 第一步只传元数据，1s 内返回 `task_id` + `upload_url`；第二步后台异步上传文件 |
+| 解析前置 | 第一步不解析文件；第二步上传时一次性 `parseFile`，结果按批切片存入 `import_task_rows`，Worker 只读切片 |
 | 异步解耦 | Outbox + Worker 轮询，不阻塞用户请求 |
-| 批量处理 | SKU 校验用 IN 查询，写入用批量 INSERT + Promise.all |
+| 批量处理 | SKU 校验用 IN 查询 + LRU 缓存；写入用 UNNEST + ON CONFLICT 批量 UPSERT |
 | 幂等保护 | (task_id, unit_id) 唯一索引 + 状态检查 + 原子抢占 |
 | 可恢复 | Outbox 持久化 + 卡死检测 + 自动重置 |
 | 全链路可观测 | traceId 贯穿 + 性能日志 + trace_events |
@@ -95,18 +105,34 @@
 - `event_outbox_status_next_retry_idx`（status + next_retry_at）
 - `event_outbox_aggregate_idx`（aggregate_id）
 
-**同事务写入**（`import-service.ts:128-143`）：
+**同事务写入**（二步上传，`import-service.ts:createImportTaskFromMeta` + `attachParsedFileToTask`）：
+
+二步上传方案下，事务在两步分别发生：
+
+- **第一步** `createImportTaskFromMeta`：`withTransaction` 内同事务写入 `import_tasks(PENDING, file_data=空)` + `import_task_batches` + `event_outbox` + `trace_events(ImportTaskCreated)`。此时不写 `import_task_rows`，批次基于前端预扫描的 `total_rows` 切分。
+- **第二步** `attachParsedFileToTask`：`withTransaction` 内 `parseFile()` 解析一次 → 按批切片写入 `import_task_rows`；删除第一步的空 batches/outbox/rows 后用真实切片重建；更新 `import_tasks.file_data/total_rows/total_batches`，状态推进至 `PROCESSING`；追加 `trace_events(ImportFileAttached)`。
 
 ```
-db.transaction(async (tx) => {
-  await tx.insert(import_tasks)...
-  await tx.insert(import_task_batches)...
-  await tx.insert(event_outbox)...
-  await tx.insert(trace_events)...
+// 第一步
+withTransaction(tx => {
+  INSERT INTO import_tasks (status='PENDING', file_data=空)
+  INSERT INTO import_task_batches (UNNEST)      -- 基于前端预扫描行数
+  INSERT INTO event_outbox (UNNEST)
+  INSERT INTO trace_events (ImportTaskCreated)
+})
+
+// 第二步
+withTransaction(tx => {
+  UPDATE import_tasks SET file_data, total_rows, total_batches, status='PROCESSING'
+  DELETE FROM import_task_batches / event_outbox / import_task_rows WHERE task_id
+  INSERT INTO import_task_batches (重建，UNNEST)
+  INSERT INTO event_outbox (重建，UNNEST)
+  INSERT INTO import_task_rows (切片 JSONB，UNNEST)
+  INSERT INTO trace_events (ImportFileAttached)
 })
 ```
 
-> Neon HTTP 不支持事务时降级为顺序执行，打 warn 日志。
+> Neon HTTP 通过 `withTransaction`（Pool 真事务 BEGIN/COMMIT/ROLLBACK）保证 Outbox 原子性。
 
 **Dispatcher 投递**（`outbox-dispatcher.ts`）：
 
@@ -121,9 +147,11 @@ db.transaction(async (tx) => {
 
 | 宕机时机 | 恢复方式 |
 |---|---|
-| 任务创建后、Outbox 投递前 | Outbox 中有 PENDING 记录，Dispatcher 恢复后继续投递 |
-| Outbox 投递后、Worker 处理前 | 批次仍为 PENDING，Worker 恢复后继续抢占处理 |
-| Worker 处理中宕机 | 批次为 PROCESSING 但 lockedAt 超时，recoverStuckBatches 重置为 PENDING |
+| 第一步后、第二步前 | `import_tasks` 为 PENDING 但 `file_data` 为空，监控页可见"积压但无文件"任务；可向同一 `upload_url` 重传文件，`attachParsedFileToTask` 会幂等重建批次/outbox/rows |
+| 第一步后、第二步前（Outbox 已投递但无文件） | 批次仍为 PENDING，Worker 抢占后发现 `import_task_rows` 为空批次会直接 finalize 为 COMPLETED（空批次），不会异常；建议运维对 PENDING+空 file_data 任务做告警 |
+| 第二步中（事务未提交） | 事务回滚，任务仍为第一步 PENDING 状态，可重传文件 |
+| 第二步后、Worker 处理前 | 批次为 PENDING，Worker 恢复后继续抢占处理 |
+| Worker 处理中宕机 | 批次为 PROCESSING 但 lockedAt 超时，recoverStuckBatches 标记为 FAILED（不重置 PENDING 防死循环） |
 
 ## 3. 批量处理策略
 
@@ -139,29 +167,29 @@ db.transaction(async (tx) => {
 
 | 校验项 | 方式 | 代码位置 |
 |---|---|---|
-| SKU 主数据 | `inArray(skuMaster.skuCode, skuCodes)` 单次 IN 查询 | `import-worker.ts:305-313` |
-| 外部编码重复 | `inArray(shipments.externalCode, externalCodes)` 单次 IN 查询 | `import-worker.ts:344-348` |
-| 本地格式 | 复用 `validators.ts` 的 `validateOrders(rows)` | `import-worker.ts:278` |
-| SKU 查询超时 | 3 秒超时 + 降级标记 | `import-worker.ts:309-322` |
+| SKU 主数据 | `inArray(skuMaster.skuCode, skuCodes)` 单次 IN 查询 + LRU 缓存（10min TTL） | `import-worker.ts:validateBatch` |
+| 外部编码重复 | `inArray(shipments.externalCode, externalCodes)` 单次 IN 查询 | `import-worker.ts:validateBatch` |
+| 本地格式 | 复用 `validators.ts` 的 `validateOrders(rows)` | `import-worker.ts:validateBatch` |
+| SKU 查询超时 | 3 秒超时（`SKU_DEGRADE_TIMEOUT_MS`）+ 降级标记 | `import-worker.ts:validateBatch` |
 
-**关键优化**：SKU 校验从逐行查询改为单次 IN 查询，1000 行只需 1 次 DB 查询。
+**关键优化**：SKU 校验从逐行查询改为单次 IN 查询 + LRU 缓存（压测命中率近 100%），1000 行只需 1 次未命中 DB 查询。
 
 ### 3.3 批量写入
 
 | 写入对象 | 批次大小 | 并发方式 | 代码位置 |
 |---|---|---|---|
-| shipments 主表 | 100 条/批 | `Promise.all` | `import-worker.ts:476-479` |
-| orders 子表 | 500 条/批 | `Promise.all` | `import-worker.ts:481-485` |
-| 错误明细 | 500 条/批 | 顺序写入 | `import-worker.ts:398-400` |
+| shipments 主表 | 整批 UNNEST | 单次 UPSERT | `import-worker.ts:batchUpsertOrders` |
+| orders 子表 | 整批 UNNEST | 单次 UPSERT | `import-worker.ts:batchUpsertOrders` |
+| 错误明细 | 整批 UNNEST | 同事务批量写 | `import-worker.ts:finalizeBatch` |
 
-**关键优化**：写入从逐行 INSERT 改为批量 INSERT + Promise.all 并发，减少 DB 往返次数。
+**关键优化**：写入从逐行 INSERT 改为 `UNNEST + ON CONFLICT DO NOTHING` 批量幂等 UPSERT（shipments 按 external_code、orders 按 (shipment_id, sku_code)），重复消费不会产生重复运单。
 
 ### 3.4 部分成功处理
 
 ```
 validateBatch() → validRows + errors
-  ├─ validRows → batchInsertOrders()
-  └─ errors → persistErrors()
+  ├─ validRows → batchUpsertOrders()
+  └─ errors   → finalizeBatch()（UNNEST 批量写 import_task_errors）
 ```
 
 - 只有 `validRows` 执行批量写入
@@ -253,8 +281,9 @@ PENDING ──Dispatcher 投递──▶ SENT
 
 | 触发方式 | 说明 | 代码位置 |
 |---|---|---|
-| 上传后后台 fetch | 上传接口返回前后台拉起 `/api/worker/run` | `api/import-tasks/route.ts:140` |
-| 前端轮询触发 | 任务详情页每 2s 轮询时触发 Worker | `tasks/[taskId]/page.tsx:90` |
+| 第二步上传完成后后台 fetch | 文件附加成功后立即拉起 `/api/worker/run` | `api/import-tasks/[taskId]/upload/route.ts` |
+| 旧路径上传后后台 fetch | 未走二步上传时，`POST /api/import-tasks` 内同步解析后触发 | `api/import-tasks/route.ts` |
+| 前端轮询触发 | 任务详情页每 2s 轮询时触发 Worker | `tasks/[taskId]/page.tsx` |
 | GitHub Actions 兜底 | 每 5 分钟定时调用 | `.github/workflows/worker.yml` |
 | 手动触发 | `POST /api/worker/run` | `api/worker/run/route.ts` |
 

@@ -24,7 +24,7 @@
 
 ## 核心特性
 
-- **上传即返回**：上传接口 P95 ≤ 1 秒，立即返回 `task_id`
+- **二步上传即返回**：前端预扫描行数 → 第一步提交元数据，服务端 1 秒内返回 `task_id` + `upload_url`；第二步后台异步上传文件，用户立即跳转进度页
 - **异步事件驱动**：Transactional Outbox + Worker 轮询消费，不阻塞用户请求
 - **批量处理**：批量 SKU 校验 + 批量 UPSERT，禁止逐行查询/写库
 - **性能目标**：10,000 行导入目标在 60 秒内完成，上传接口和任务进度均可持续推进
@@ -35,21 +35,25 @@
 ## 架构概览
 
 ```
-用户上传 → POST /api/import-tasks (≤1s 返回 task_id)
-                ↓ (同事务)
-    import_tasks + import_task_batches + event_outbox + trace_events
+用户上传
+   ├─ 1) 前端预扫描文件，得到 total_rows
+   ├─ 2) POST /api/import-tasks（元数据，1s 内返回 task_id + upload_url）
+   │        ↓ (同事务)
+   │    import_tasks(PENDING) + import_task_batches + event_outbox + trace_events
+   ├─ 3) 后台异步 POST {upload_url} 上传文件（不等待）
+   │        ↓ (attachParsedFileToTask 真事务)
+   │    parseFile → 切片 → import_task_rows + 重建批次/outbox + 状态→PROCESSING
+   └─ 4) 立即跳转 /tasks/:taskId，轮询进度（每 2s）
                 ↓
-    Outbox Dispatcher (标记 SENT)
+        Outbox Dispatcher (标记 SENT)
                 ↓
-    Worker (轮询 PENDING 批次)
-        ├─ 复用 V2 规则引擎解析
-        ├─ 批量 SKU 校验 (IN 查询)
-        ├─ 批量写入运单 (主子表)
-        ├─ 错误明细写入 (行级)
-        ├─ 性能日志写入
-        └─ 任务状态聚合
-                ↓
-    前端轮询任务进度 (每 2s)
+        Worker (轮询 PENDING 批次)
+            ├─ 读 import_task_rows 切片（不再重读原文件）
+            ├─ 批量 SKU 校验 (IN 查询)
+            ├─ 批量写入运单 (主子表, UNNEST + ON CONFLICT)
+            ├─ 错误明细写入 (行级)
+            ├─ 性能日志写入
+            └─ 任务状态聚合
 ```
 
 ## 快速开始
@@ -122,7 +126,8 @@ npm run benchmark    # 上传 10,000 行文件并测量全链路耗时
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/import-tasks` | 上传文件，创建异步导入任务 |
+| POST | `/api/import-tasks` | 第一步：提交元数据，创建任务并返回 `upload_url` |
+| POST | `/api/import-tasks/:taskId/upload` | 第二步：上传文件二进制，解析并重建批次 |
 | GET | `/api/import-tasks` | 任务列表 |
 | GET | `/api/import-tasks/:taskId` | 查询任务进度 |
 | GET | `/api/import-tasks/:taskId/errors` | 查询错误明细（分页、筛选） |

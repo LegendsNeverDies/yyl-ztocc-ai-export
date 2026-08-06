@@ -1,10 +1,16 @@
 # 接口文档
 
-## 1. 上传接口
+## 1. 上传接口（二步上传方案）
 
-### POST /api/import-tasks
+系统采用 **二步上传**（Two-Step Upload）流程，将"创建任务"与"上传文件"解耦：前端先在浏览器内预扫描文件拿到 `total_rows`，第一步仅提交元数据，服务端 1 秒内即可返回 `task_id` 与 `upload_url`；第二步前端在后台异步上传文件，用户立即跳转至任务进度页，无需等待文件传输完成。
 
-上传 Excel 文件，创建异步导入任务。
+> 兼容旧路径：若请求不携带 `total_rows`，则回退为旧的"一步上传"——服务端读取并解析文件后再创建任务，会阻塞请求。
+
+### 1.1 第一步：创建任务（仅元数据）
+
+#### POST /api/import-tasks
+
+提交文件元数据（不含 file），预创建任务与批次/Outbox，立即返回 `task_id` 和文件上传端点 `upload_url`。
 
 **请求**：
 
@@ -13,16 +19,22 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `file` | File | 是 | Excel 文件（.xlsx） |
+| `file_name` | string | 二步上传必填 | 文件名（前端从本地 File 对象取） |
+| `file_type` | string | 否 | `excel` 或 `pdf`，默认 `excel` |
 | `rule_id` | string | 是 | 解析规则 ID |
-| `batch_size` | number | 否 | 批次大小（默认 1000） |
+| `total_rows` | number | 二步上传必填 | 前端预扫描得到的总行数（用于切分批次） |
+| `batch_size` | number | 否 | 批次大小（默认 1000，范围 250~2000） |
 
-**示例**：
+> 兼容字段：仍可直接传 `file`（File）走旧路径，此时不传 `total_rows`。
+
+**示例（二步上传第一步）**：
 
 ```bash
 curl -X POST https://yyl-ztocc-ai-export.vercel.app/api/import-tasks \
-  -F "file=@test-data/10000-orders.xlsx" \
+  -F "file_name=10000-orders.xlsx" \
+  -F "file_type=excel" \
   -F "rule_id=0f143f51-fcfe-481c-baaa-f935d5fdff80" \
+  -F "total_rows=10000" \
   -F "batch_size=1000"
 ```
 
@@ -32,20 +44,66 @@ curl -X POST https://yyl-ztocc-ai-export.vercel.app/api/import-tasks \
 {
   "task_id": "746c54cb-56b5-4afa-bd49-7fac77fe8204",
   "trace_id": "trace_232136ad4cd7401b87e70016",
-  "total_rows": 10000,
-  "total_batches": 11,
   "status": "PENDING",
-  "message": "任务已创建，正在异步处理"
+  "total_rows": 10000,
+  "total_batches": 10,
+  "upload_url": "https://yyl-ztocc-ai-export.vercel.app/api/import-tasks/746c54cb-56b5-4afa-bd49-7fac77fe8204/upload"
 }
 ```
+
+> 前端拿到 `task_id` 与 `upload_url` 后应立即跳转至 `/tasks/:taskId`，并在后台异步向 `upload_url` 发起第二步文件上传，不等待其完成。
 
 **错误响应**（400）：
 
 ```json
-{ "error": "文件为空" }
-{ "error": "rule_id 不能为空" }
-{ "error": "规则不存在" }
+{ "error": "缺少 file 或 total_rows 字段" }
+{ "error": "缺少 rule_id 字段" }
+{ "error": "规则 <rule_id> 不存在" }
 ```
+
+---
+
+### 1.2 第二步：上传文件
+
+#### POST /api/import-tasks/:taskId/upload
+
+将文件本身上传至第一步返回的 `upload_url`，服务端读取并解析文件、按批切片重建批次/Outbox/解析切片，任务状态从 `PENDING` 推进至 `PROCESSING`，并触发一次后台 Worker 消费。
+
+**请求**：
+
+- Content-Type: `multipart/form-data`
+- Body：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `file` | File | 是 | 真正的 Excel/PDF 文件二进制 |
+
+**示例**：
+
+```bash
+curl -X POST "https://yyl-ztocc-ai-export.vercel.app/api/import-tasks/746c54cb-56b5-4afa-bd49-7fac77fe8204/upload" \
+  -F "file=@test-data/10000-orders.xlsx"
+```
+
+**响应**（200 OK）：
+
+```json
+{
+  "ok": true,
+  "task_id": "746c54cb-56b5-4afa-bd49-7fac77fe8204"
+}
+```
+
+**错误响应**：
+
+| 状态码 | 错误 | 场景 |
+|---|---|---|
+| 400 | `缺少 file 字段` | 未携带文件 |
+| 404 | `任务 <taskId> 不存在` | 第一步任务未创建或已被删除 |
+| 404 | `规则 <ruleId> 不存在` | 关联规则被删除 |
+| 500 | `上传失败` | 文件解析或事务失败 |
+
+> 容错说明：若第二步上传失败或超时，第一步创建的任务仍以 `PENDING` 状态保留于 `import_tasks`（`file_data` 为空），监控页将出现"积压但无文件"的 PENDING 任务。运维可重新向同一 `upload_url` 发起上传，或手动将任务标记为 `FAILED`。
 
 ---
 

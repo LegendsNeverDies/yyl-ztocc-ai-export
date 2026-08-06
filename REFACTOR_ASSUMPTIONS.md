@@ -11,7 +11,7 @@
 
 | 评分维度 | 设计落地 |
 |---|---|
-| 上传即返回 | 上传接口只创建任务并返回 `task_id`，不等待 10,000 行导入完成 |
+| 上传即返回 | **二步上传**：前端预扫描行数 → 第一步只传元数据，服务端 1s 内返回 `task_id` + `upload_url`；第二步后台异步上传文件，用户立即跳转进度页 |
 | 异步任务 | 任务、批次、Outbox 与 Worker 形成完整的异步执行链路 |
 | 批量处理 | 采用批次级校验、批量写入，避免逐行查询与逐行 INSERT |
 | 进度感知 | 任务详情页可实时显示处理状态、进度和错误变化 |
@@ -20,13 +20,37 @@
 | 压测自证 | 压测脚本生成 10,000 行运单与 20,000 SKU 主数据，并输出实测指标 |
 | 部署可行性 | 方案兼顾 Vercel Serverless 限制，并提供 Worker 兜底触发 |
 
-换言之，所有实现都围绕“是否真正满足考试验收口径”来展开，而不是单纯追求技术花哨度。
+换言之，所有实现都围绕"是否真正满足考试验收口径"来展开，而不是单纯追求技术花哨度。
+
+---
+
+## 0.5 为什么改成二步上传（Two-Step Upload）
+
+**痛点**：旧"一步上传"下，服务端必须在 `POST /api/import-tasks` 请求内完成 `readFile`（把 Excel/PDF 读为 RawRow 网格）+ `parseFile`（按规则解析为 OrderRow）+ 批次切分 + 多表事务。对 10,000 行文件，仅 `readFile` 就可能要几百毫秒至数秒，加上 `parseFile` 后总耗时逼近 Vercel Serverless 默认 10s 请求超时，P95 ≤ 1s 的目标在高并发下并不稳定。
+
+**新方案**：
+
+1. **前端预扫描**：文件读取本就在浏览器内完成（见 `CLAUDE.md`），前端 `readFile` 时已得到 `parsedFile.rows.length`，把它作为 `total_rows` 提交给服务端即可。
+2. **第一步（≤1s）**：`POST /api/import-tasks` 只收元数据，`createImportTaskFromMeta` 在一个事务内创建 `import_tasks(PENDING)` + `import_task_batches` + `event_outbox` + `trace_events`，`file_data` 留空，立即返回 `task_id` + `upload_url`。
+3. **第二步（后台异步）**：前端拿到 `upload_url` 后，在后台 `fetch(upload_url, { body: FormData })` 上传文件，**不 await**，同时立即 `router.push('/tasks/:taskId')`。
+4. **服务端附加文件**：`attachParsedFileToTask` 在一个事务内 `parseFile` 解析 + 按批切片写 `import_task_rows` + 删除并重建 batches/outbox + 状态推进至 `PROCESSING` + 触发 Worker。
+
+**收益**：
+- 上传接口 P95 稳定 ≤ 1s（只剩一次事务 + 规则校验，不读文件不解析）；
+- 用户体验更好：点击后立即看到任务页，文件上传与进度推进并行；
+- 解析仍只发生一次（在第二步事务内），Worker 仍只读 `import_task_rows` 切片，不重复解析。
+
+**取舍 / 风险**：
+- 任务在第一步到第二步之间存在"PENDING 但无文件"窗口期；若第二步上传失败或前端关闭，会留下空壳任务。已通过监控页"积压但无文件"告警 + 支持重传同 `upload_url` 兜底；后续可加定时清理 PENDING 超时任务。
+- 前端预扫描的 `total_rows` 与第二步真实解析后的行数可能不一致（解析会按规则过滤非数据行）。第二步 `attachParsedFileToTask` 以**真实解析后的 `allRows.length`** 为准重建批次与 `total_rows`，覆盖第一步的预估值；这是预期行为，不是 bug。
+
+---
 
 ---
 
 ## 1. 为什么选择异步事件驱动，而不是继续同步处理
 
-**痛点**：原 V2 在一次 HTTP 请求中完成"文件读取 → 规则解析 → 逐行校验 → 逐行写库"，10,000 行数据即使每行 200ms 也要 30 分钟，必然触发 Vercel Serverless 请求超时（默认 10s~60s），用户无法完成下单。
+**痛点**：原 V2 在一次 HTTP 请求中完成"文件读取 → 规则解析 → 逐行校验 → 逐行写库"，10,000 行数据即使每行 200ms 也要 30 分钟，必然触发 Vercel Serverless 请求超时（默认 10s~60s），用户无法完成下单。即便重构为异步链路，若上传接口仍在请求内 readFile + parseFile，10,000 行的读取+解析也可能逼近超时，P95 ≤ 1s 目标在高并发下不稳定。
 
 **选择异步的理由**：
 - Vercel Serverless 单请求不适合长阻塞任务；
@@ -111,10 +135,10 @@
 
 ## 6. Outbox 如何避免"任务创建成功但消息丢失"
 
-**机制**：Transactional Outbox 模式。
-- 上传接口在 `db.transaction()` 内同时写入：`import_tasks` + `import_task_batches` + `event_outbox` + `trace_events`；
-- 这四类写入在同一事务内，要么全部成功要么全部回滚；
-- 即使服务在事务提交后、Dispatcher 投递前宕机，`event_outbox` 中仍有 PENDING 记录；
+**机制**：Transactional Outbox 模式（二步上传下分两步落地）。
+- **第一步** `createImportTaskFromMeta` 在 `withTransaction` 内同时写入：`import_tasks(PENDING, file_data=空)` + `import_task_batches`（基于前端预扫描 total_rows 切分）+ `event_outbox` + `trace_events(ImportTaskCreated)`；四类写入在同一事务内，要么全部成功要么全部回滚；
+- **第二步** `attachParsedFileToTask` 在 `withTransaction` 内 `parseFile` + 切片 + 删除重建 batches/outbox/rows + 状态推进至 PROCESSING + `trace_events(ImportFileAttached)`；
+- 即使服务在第一步事务提交后、第二步上传前宕机，`event_outbox` 中仍有 PENDING 记录，`import_tasks` 仍以 PENDING 存在（file_data 为空），可重传 `upload_url`；
 - Dispatcher 恢复后会继续轮询 PENDING 事件并标记为 SENT。
 
 **Worker 消费**：
@@ -133,7 +157,8 @@
 2. **状态检查**：Worker 处理前先查批次状态，若已是 `COMPLETED` 直接返回；
 3. **原子抢占**：用 `UPDATE ... SET status='PROCESSING' WHERE status='PENDING' RETURNING` 原子抢占，多个 Worker 并发不会抢到同一批；
 4. **进度累计**：任务级 `processed_rows/success_rows/failed_rows` 使用绝对值（由所有批次聚合计算），而非增量累加，避免重复消费导致重复累计；
-5. **写入幂等**：批量 UPSERT 基于 `external_code` 业务键（当前实现为 INSERT，若需严格幂等可改为 ON CONFLICT DO UPDATE）。
+5. **写入幂等**：批量 UPSERT 基于 `UNNEST + ON CONFLICT DO NOTHING`——shipments 按 `external_code`、orders 按 `(shipment_id, sku_code)`，重复消费不会产生重复运单；
+6. **第二步重传幂等**：`attachParsedFileToTask` 在事务内先 DELETE 再重建 batches/outbox/rows，重复上传同一 `upload_url` 不会产生重复批次。
 
 ---
 
