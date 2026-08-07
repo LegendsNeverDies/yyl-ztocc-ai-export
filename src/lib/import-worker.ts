@@ -123,6 +123,29 @@ export async function runWorker(): Promise<{ processed: number; results: Process
         totalMs: 0,
         error: errMsg,
       });
+      await finalizeBatch(
+        batch.task_id,
+        batch.unit_id,
+        batch.batch_index,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "FAILED",
+        traceId,
+        [
+          {
+            rowIndex: -1,
+            field: "_worker",
+            message: `Worker 异常：${errMsg}`,
+            code: ERROR_CODES.DB_INSERT_FAILED,
+            rawValue: "",
+          },
+        ],
+        errMsg
+      );
       await recordTrace(traceId, batch.task_id, batch.unit_id, "ImportBatchFailed", "FAILED", `单元 ${batch.unit_id} 异常：${errMsg}`);
     }
 

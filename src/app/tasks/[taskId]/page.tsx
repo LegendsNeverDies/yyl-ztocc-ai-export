@@ -203,7 +203,7 @@ export default function TaskDetailPage() {
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatCard label="总批次" value={progress.total_batches} />
           <StatCard label="已完成批次" value={progress.completed_batches} color="#0fc6c2" />
-          <StatCard label="吞吐量" value={progress.throughput ? `${progress.throughput.toFixed(1)} 行/秒` : "-"} icon={<TrendingUp className="h-3 w-3" />} />
+          <StatCard label="吞吐量" value={progress.throughput != null ? `${progress.throughput.toFixed(1)} 行/秒` : "-"} icon={<TrendingUp className="h-3 w-3" />} />
           <StatCard label="预计剩余" value={progress.eta_seconds != null ? `${progress.eta_seconds}s` : "-"} icon={<Clock className="h-3 w-3" />} />
         </div>
         {progress.error_message && (

@@ -172,7 +172,7 @@ export async function createImportTask(params: CreateTaskParams): Promise<Create
       [traceId, taskId, `用户上传文件 ${params.fileName}，解析 ${totalRows} 行，拆分为 ${totalBatches} 个处理单元`]
     );
     await tx.query(
-      `UPDATE import_tasks SET status = 'PROCESSING' WHERE id = $1 AND status = 'PENDING'`,
+      `UPDATE import_tasks SET status = 'PROCESSING', started_at = NOW() WHERE id = $1 AND status = 'PENDING'`,
       [taskId]
     );
   });
@@ -372,7 +372,7 @@ export async function attachParsedFileToTask(taskId: string, parsedFile: ParsedF
   await withTransaction(async (tx) => {
     // 更新 import_tasks 基础字段与 fileData
     await tx.query(
-      `UPDATE import_tasks SET file_data = $2, total_rows = $3, total_batches = $4, batch_size = $5, status = 'PROCESSING'
+      `UPDATE import_tasks SET file_data = $2, total_rows = $3, total_batches = $4, batch_size = $5, status = 'PROCESSING', started_at = NOW()
        WHERE id = $1`,
       [taskId, JSON.stringify(serializeParsedFile(parsedFile)), totalRows, totalBatches, normalizedBatchSize]
     );
@@ -446,9 +446,9 @@ export async function getTaskProgress(taskId: string): Promise<ImportTaskProgres
   let etaSeconds: number | null | undefined;
 
   if (t.startedAt && processed > 0 && processed < t.totalRows) {
-    const elapsedMs = (t.startedAt?.getTime?.() ?? Date.parse(t.startedAt as unknown as string)) || 0;
+    const startedAtMs = t.startedAt ? (t.startedAt instanceof Date ? t.startedAt.getTime() : Date.parse(t.startedAt as unknown as string)) : Date.parse(t.createdAt?.toISOString?.() ?? new Date().toISOString());
     const now = Date.now();
-    const elapsedSec = Math.max(1, (now - elapsedMs) / 1000);
+    const elapsedSec = Math.max(1, (now - startedAtMs) / 1000);
     throughput = processed / elapsedSec;
     const remaining = t.totalRows - processed;
     etaSeconds = throughput > 0 ? Math.ceil(remaining / throughput) : null;
