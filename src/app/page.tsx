@@ -86,17 +86,17 @@ export default function HomePage() {
       const uploadForm = new FormData();
       uploadForm.append("file", file);
 
-      // 为了避免大文件上传在页面跳转时被中断，先等待文件上传请求成功
-      try {
-        const uploadRes = await fetch(uploadUrl, { method: "POST", body: uploadForm });
-        if (!uploadRes.ok) {
-          const uploadErr = await uploadRes.json().catch(() => ({}));
-          throw new Error(uploadErr.message || `文件上传失败 (${uploadRes.status})`);
-        }
-      } catch (uploadError) {
-        console.error("上传文件失败:", uploadError);
-        showToast(uploadError instanceof Error ? uploadError.message : "上传文件失败", "error");
-      }
+      void fetch(uploadUrl, { method: "POST", body: uploadForm })
+        .then((uploadRes) => {
+          if (!uploadRes.ok) {
+            return uploadRes.json().catch(() => ({})).then((uploadErr) => {
+              console.error("异步上传文件失败:", uploadRes.status, uploadRes.statusText, uploadErr);
+            });
+          }
+        })
+        .catch((uploadError) => {
+          console.error("异步上传文件失败:", uploadError);
+        });
 
       router.push(`/tasks/${data.task_id}`);
     } catch (err) {
