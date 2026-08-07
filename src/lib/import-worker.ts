@@ -133,6 +133,7 @@ export async function runWorker(): Promise<{ processed: number; results: Process
         0,
         0,
         0,
+        0,
         "FAILED",
         traceId,
         [
