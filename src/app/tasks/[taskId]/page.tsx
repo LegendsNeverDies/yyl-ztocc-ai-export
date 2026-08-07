@@ -42,7 +42,15 @@ export default function TaskDetailPage() {
       setProgress(data);
       // 任务进行中时，同时轻量触发 Worker（加速消费，让进度 ≤2 秒可见变化）
       if (data.status === "PENDING" || data.status === "PROCESSING") {
-        fetch("/api/worker/run", { method: "POST" }).catch(() => {});
+        fetch("/api/worker/run", { method: "POST" })
+          .then((res) => {
+            if (!res.ok) {
+              console.warn("task page trigger worker/run failed", res.status, res.statusText);
+            }
+          })
+          .catch((err) => {
+            console.warn("task page trigger worker/run error", err);
+          });
       }
     } catch {
       /* ignore */

@@ -42,7 +42,15 @@ export async function POST(req: NextRequest, ctx: any) {
     if (process.env.WORKER_API_KEY) {
       workerHeaders["x-worker-key"] = process.env.WORKER_API_KEY;
     }
-    void fetch(workerUrl, { method: "POST", headers: workerHeaders }).catch(() => {});
+    void fetch(workerUrl, { method: "POST", headers: workerHeaders })
+      .then((res) => {
+        if (!res.ok) {
+          console.error("[import-tasks/upload] trigger worker/run failed", res.status, res.statusText);
+        }
+      })
+      .catch((err) => {
+        console.error("[import-tasks/upload] trigger worker/run error", err);
+      });
 
     return NextResponse.json({ ok: true, task_id: taskId });
   } catch (error) {

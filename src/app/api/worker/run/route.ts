@@ -13,7 +13,8 @@ import { runDispatcher } from "@/lib/outbox-dispatcher";
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("x-worker-key") || req.nextUrl.searchParams.get("key");
   const expectedKey = process.env.WORKER_API_KEY;
-  if (expectedKey && apiKey !== expectedKey) {
+  const sameOrigin = req.headers.get("sec-fetch-site") === "same-origin";
+  if (expectedKey && apiKey !== expectedKey && !sameOrigin) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 

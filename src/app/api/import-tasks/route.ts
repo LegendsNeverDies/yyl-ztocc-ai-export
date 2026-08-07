@@ -157,7 +157,15 @@ export async function POST(req: NextRequest) {
     if (process.env.WORKER_API_KEY) {
       workerHeaders["x-worker-key"] = process.env.WORKER_API_KEY;
     }
-    void fetch(workerUrl, { method: "POST", headers: workerHeaders }).catch(() => {});
+    void fetch(workerUrl, { method: "POST", headers: workerHeaders })
+      .then((res) => {
+        if (!res.ok) {
+          console.error("[import-tasks] trigger worker/run failed", res.status, res.statusText);
+        }
+      })
+      .catch((err) => {
+        console.error("[import-tasks] trigger worker/run error", err);
+      });
 
     const elapsed = Date.now() - startTime;
     console.log(`[import-tasks] 任务创建完成 task_id=${created.taskId} trace_id=${created.traceId} rows=${created.totalRows} batches=${created.totalBatches} 耗时=${elapsed}ms`);
