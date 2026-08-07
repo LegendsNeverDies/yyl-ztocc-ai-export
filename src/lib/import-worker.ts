@@ -64,9 +64,11 @@ export async function runWorker(): Promise<{ processed: number; results: Process
     `UPDATE import_task_batches
        SET status = 'PROCESSING', locked_at = NOW()
      WHERE id IN (
-       SELECT id FROM import_task_batches
-       WHERE status = 'PENDING'
-       ORDER BY batch_index ASC
+       SELECT b.id
+       FROM import_task_batches b
+       JOIN import_task_rows r ON b.task_id = r.task_id AND b.batch_index = r.batch_index
+       WHERE b.status = 'PENDING'
+       ORDER BY b.batch_index ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED
      )
@@ -518,7 +520,7 @@ async function aggregateTask(taskId: string, traceId: string): Promise<void> {
   if (!p) return;
 
   const allCompleted = p.completed_batches === p.total_batches;
-  const allFailed = allCompleted && p.success_rows === 0;
+  const allFailed = allCompleted && p.success_rows === 0 && p.processed_rows > 0;
 
   let newStatus: string;
   if (!allCompleted) {

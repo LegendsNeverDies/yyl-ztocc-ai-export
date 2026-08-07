@@ -308,17 +308,16 @@ export async function createImportTaskFromMeta(params: CreateTaskFromMetaParams)
  * 附加时会 parseFile 解析一次，按批切片存入 import_task_rows。
  */
 export async function attachParsedFileToTask(taskId: string, parsedFile: ParsedFile, rule: ParseRule): Promise<void> {
-  const totalRows = parsedFile.rows.length;
-
   const taskRows = await db.select().from(importTasks).where(eq(importTasks.id, taskId)).limit(1);
   if (taskRows.length === 0) throw new Error(`task ${taskId} not found`);
   const existing = taskRows[0];
   const batchSize = existing.batchSize ?? CONFIG.BATCH_SIZE;
   const normalizedBatchSize = Math.max(250, Math.min(2000, batchSize));
-  const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
 
   // 解析前置：附加文件时也解析一次，切片存 import_task_rows
   const allRows = parseFile(parsedFile, rule);
+  const totalRows = allRows.length;
+  const totalBatches = Math.max(1, Math.ceil(totalRows / normalizedBatchSize));
   const chunkJsons: string[] = [];
   const chunkStart: number[] = [];
   const chunkEnd: number[] = [];
