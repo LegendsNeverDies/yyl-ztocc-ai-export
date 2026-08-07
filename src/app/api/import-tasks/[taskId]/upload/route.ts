@@ -6,10 +6,9 @@ import { db } from "@/lib/db";
 import { importTasks } from "@/lib/db-schema";
 import { eq } from "drizzle-orm";
 
-export async function POST(req: NextRequest, ctx: any) {
+export async function POST(req: NextRequest, { params }: { params: { taskId: string } }) {
   try {
-    const params = ctx?.params ?? {};
-    const taskId = params.taskId as string | undefined;
+    const taskId = params?.taskId;
     if (!taskId) {
       return NextResponse.json({ error: "缺少 taskId 参数" }, { status: 400 });
     }
